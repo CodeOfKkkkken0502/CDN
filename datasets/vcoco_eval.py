@@ -37,6 +37,7 @@ class VCOCOEvaluator():
             if len(subject_ids) > 0:
                 object_labels = np.array([bboxes[object_id]['category_id'] for object_id in object_ids])
                 correct_mat = np.concatenate((correct_mat, np.ones((correct_mat.shape[0], 1))), axis=1)
+                #print(object_ids.shape, object_labels.shape,correct_mat.shape)
                 masks = correct_mat[verb_labels, object_labels]
                 hoi_scores *= masks
 

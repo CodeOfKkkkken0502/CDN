@@ -56,9 +56,9 @@ class CDN(nn.Module):
                           pos=pos_embed, query_pos=query_embed)
         hopd_out = hopd_out.transpose(1, 2)
 
-
-        interaction_query_embed = hopd_out[-1]
-        interaction_query_embed = interaction_query_embed.permute(1, 0, 2)
+        interaction_query_embed = query_embed
+        #interaction_query_embed = hopd_out[-1]
+        #interaction_query_embed = interaction_query_embed.permute(1, 0, 2)
 
         interaction_tgt = torch.zeros_like(interaction_query_embed)
         interaction_decoder_out = self.interaction_decoder(interaction_tgt, memory, memory_key_padding_mask=mask,

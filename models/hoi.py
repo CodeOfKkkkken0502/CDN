@@ -11,7 +11,7 @@ from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
 import numpy as np
 from queue import Queue
 import math
-
+import pdb
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .cdn import build_cdn
@@ -42,19 +42,20 @@ class CDNHOI(nn.Module):
         if not isinstance(samples, NestedTensor):
             samples = nested_tensor_from_tensor_list(samples)
         features, pos = self.backbone(samples)
-
-        src, mask = features[-1].decompose()
+        # pos:[B,hidden_dim(256),15,20]
+        src, mask = features[-1].decompose()  # src:[B,2048,15,20],mask:[B,15,20]
         assert mask is not None
         hopd_out, interaction_decoder_out = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[:2]
-
-        outputs_sub_coord = self.sub_bbox_embed(hopd_out).sigmoid()
-        outputs_obj_coord = self.obj_bbox_embed(hopd_out).sigmoid()
-        outputs_obj_class = self.obj_class_embed(hopd_out)
+        # self.input_proj(src):[B,256,15,20]
+        # hopd_out, interaction_decoder_out:[C(3),B,num_queries(100),hidden_dim(256)]
+        outputs_sub_coord = self.sub_bbox_embed(hopd_out).sigmoid()  # [C(3),B,num_queries(100),4]
+        outputs_obj_coord = self.obj_bbox_embed(hopd_out).sigmoid()  # [C(3),B,num_queries(100),4]
+        outputs_obj_class = self.obj_class_embed(hopd_out)  # [C(3),B,num_queries(100),num_obj_classes+1(82)]
         if self.use_matching:
             outputs_matching = self.matching_embed(hopd_out)
 
         outputs_verb_class = self.verb_class_embed(interaction_decoder_out)
-
+        # [C(3),B,num_queries(100),num_verb_classes(29)]
         out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
         if self.use_matching:
@@ -65,7 +66,7 @@ class CDNHOI(nn.Module):
                 out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
                                                         outputs_sub_coord, outputs_obj_coord,
                                                         outputs_matching)
-            else:                                            
+            else:
                 out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
                                                         outputs_sub_coord, outputs_obj_coord)
 
@@ -75,14 +76,230 @@ class CDNHOI(nn.Module):
     def _set_aux_loss(self, outputs_obj_class, outputs_verb_class, outputs_sub_coord, outputs_obj_coord, outputs_matching=None):
         min_dec_layers_num = min(self.dec_layers_hopd, self.dec_layers_interaction)
         if self.use_matching:
-            return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c, \
+            return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c,
                      'pred_obj_boxes': d, 'pred_matching_logits': e}
-                    for a, b, c, d, e in zip(outputs_obj_class[-min_dec_layers_num : -1], outputs_verb_class[-min_dec_layers_num : -1], \
-                                             outputs_sub_coord[-min_dec_layers_num : -1], outputs_obj_coord[-min_dec_layers_num : -1], \
+                    for a, b, c, d, e in zip(outputs_obj_class[-min_dec_layers_num : -1], outputs_verb_class[-min_dec_layers_num : -1],
+                                             outputs_sub_coord[-min_dec_layers_num : -1], outputs_obj_coord[-min_dec_layers_num : -1],
                                              outputs_matching[-min_dec_layers_num : -1])]
         else:
             return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c, 'pred_obj_boxes': d}
-                    for a, b, c, d in zip(outputs_obj_class[-min_dec_layers_num : -1], outputs_verb_class[-min_dec_layers_num : -1], \
+                    for a, b, c, d in zip(outputs_obj_class[-min_dec_layers_num : -1], outputs_verb_class[-min_dec_layers_num : -1],
+                                          outputs_sub_coord[-min_dec_layers_num : -1], outputs_obj_coord[-min_dec_layers_num : -1])]
+
+
+class CDNHOI2(nn.Module):
+
+    def __init__(self, backbone, transformer, num_obj_classes, num_verb_classes, num_queries, aux_loss=False, args=None):
+        super().__init__()
+        self.num_obj_classes = num_obj_classes
+        self.num_verb_classes = num_verb_classes
+        self.num_queries = num_queries
+        self.transformer = transformer
+        hidden_dim = transformer.d_model
+        self.query_embed = nn.Embedding(num_queries, hidden_dim)
+        self.sub_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+        #self.obj_bbox_embed = MLP(hidden_dim, hidden_dim, 4 + num_obj_classes + 1, 3)
+        self.obj_bbox_class_embed = MLP(hidden_dim, hidden_dim, 4 + num_obj_classes + 1, 3)
+        # self.obj_verb_class_embed = MLP(hidden_dim * 2, hidden_dim * 2, num_obj_classes + 1 + num_verb_classes, 3)
+        # self.obj_verb_class_embed = nn.Linear(hidden_dim * 2, num_obj_classes + 1 + num_verb_classes)
+        #self.obj_class_embed_ = nn.Linear(hidden_dim * 2, num_obj_classes + 1)
+        self.verb_class_embed = nn.Linear(hidden_dim * 2, num_verb_classes)
+        self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
+        self.backbone = backbone
+        self.aux_loss = aux_loss
+        self.use_matching = args.use_matching
+        self.dec_layers_hopd = args.dec_layers_hopd
+        self.dec_layers_interaction = args.dec_layers_interaction
+        if self.use_matching:
+            self.matching_embed = nn.Linear(hidden_dim, 2)
+
+    def forward(self, samples: NestedTensor):
+        if not isinstance(samples, NestedTensor):
+            samples = nested_tensor_from_tensor_list(samples)
+        features, pos = self.backbone(samples)
+        # pos:[B,hidden_dim(256),15,20]
+        src, mask = features[-1].decompose()  # src:[B,2048,15,20],mask:[B,15,20]
+        assert mask is not None
+        hopd_out, interaction_decoder_out = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[:2]
+        # self.input_proj(src):[B,256,15,20]
+        # hopd_out, interaction_decoder_out:[C(3),B,num_queries(100),hidden_dim(256)]
+        outputs_sub_coord = self.sub_bbox_embed(hopd_out).sigmoid()  # [C(3),B,num_queries(100),4]
+        obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
+        # outputs_obj_coord = self.obj_verb_embed(obj_verb_rep)[:, :, :, 0:4].sigmoid()  # [C(3),B,num_queries(100),4]
+        outputs_obj_coord = self.obj_bbox_class_embed(hopd_out)[:,:,:,0:4].sigmoid()
+        # outputs_obj_class = self.obj_verb_embed(obj_verb_rep)[:, :, :, 4:self.num_obj_classes + 5]  # [C(3),B,num_queries(100),num_obj_classes+1(82)]
+        # outputs_obj_class = self.obj_verb_class_embed(obj_verb_rep)[:, :, :, 0:self.num_obj_classes + 1]
+        #outputs_obj_class = self.obj_class_embed_(obj_verb_rep)
+        outputs_obj_class = self.obj_bbox_class_embed(hopd_out)[:,:,:,4:]
+        if self.use_matching:
+            outputs_matching = self.matching_embed(hopd_out)
+
+        # outputs_verb_class = self.obj_verb_embed(obj_verb_rep)[:, :, :, -self.num_verb_classes:]
+        # outputs_verb_class = self.obj_verb_class_embed(obj_verb_rep)[:, :, :, self.num_obj_classes + 1:]
+        outputs_verb_class = self.verb_class_embed(obj_verb_rep)
+        # [C(3),B,num_queries(100),num_verb_classes(29)]
+        out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
+               'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
+        if self.use_matching:
+            out['pred_matching_logits'] = outputs_matching[-1]
+
+        if self.aux_loss:
+            if self.use_matching:
+                out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
+                                                        outputs_sub_coord, outputs_obj_coord,
+                                                        outputs_matching)
+            else:
+                out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
+                                                        outputs_sub_coord, outputs_obj_coord)
+
+        return out
+
+    @torch.jit.unused
+    def _set_aux_loss(self, outputs_obj_class, outputs_verb_class, outputs_sub_coord, outputs_obj_coord, outputs_matching=None):
+        min_dec_layers_num = min(self.dec_layers_hopd, self.dec_layers_interaction)
+        if self.use_matching:
+            return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c,
+                     'pred_obj_boxes': d, 'pred_matching_logits': e}
+                    for a, b, c, d, e in zip(outputs_obj_class[-min_dec_layers_num : -1], outputs_verb_class[-min_dec_layers_num : -1],
+                                             outputs_sub_coord[-min_dec_layers_num : -1], outputs_obj_coord[-min_dec_layers_num : -1],
+                                             outputs_matching[-min_dec_layers_num : -1])]
+        else:
+            return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c, 'pred_obj_boxes': d}
+                    for a, b, c, d in zip(outputs_obj_class[-min_dec_layers_num : -1], outputs_verb_class[-min_dec_layers_num : -1],
+                                          outputs_sub_coord[-min_dec_layers_num : -1], outputs_obj_coord[-min_dec_layers_num : -1])]
+
+class CDNCompo(nn.Module):
+
+    def __init__(self, backbone, transformer, num_obj_classes, num_verb_classes, num_queries, aux_loss=False, args=None):
+        super().__init__()
+        self.num_queries = num_queries
+        self.transformer = transformer
+        hidden_dim = transformer.d_model
+        self.query_embed = nn.Embedding(num_queries, hidden_dim)
+        self.obj_class_embed = nn.Linear(hidden_dim, num_obj_classes + 1)
+        self.verb_class_embed = nn.Linear(hidden_dim * 2, num_verb_classes)
+        self.sub_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+        self.obj_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+        self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
+        self.backbone = backbone
+        self.aux_loss = aux_loss
+        self.use_matching = args.use_matching
+        self.dec_layers_hopd = args.dec_layers_hopd
+        self.dec_layers_interaction = args.dec_layers_interaction
+        if self.use_matching:
+            self.matching_embed = nn.Linear(hidden_dim, 2)
+
+    def forward(self, samples):
+        hopd_outs = []
+        interaction_decoder_outs = []
+        outs = []
+        if isinstance(samples, list):
+            for sample in samples:
+                features, pos = self.backbone(sample)
+                # pos:[B,hidden_dim(256),15,20]
+                src, mask = features[-1].decompose()
+                # src:[B,2048,15,20],mask:[B,15,20]
+                assert mask is not None
+                hopd_out, interaction_decoder_out = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[:2]
+                hopd_outs.append(hopd_out)
+                interaction_decoder_outs.append(interaction_decoder_out)
+                # self.input_proj(src):[B,256,15,20]
+                # hopd_out, interaction_decoder_out:[C(3),B,num_queries(100),hidden_dim(256)]
+                outputs_sub_coord = self.sub_bbox_embed(hopd_out).sigmoid()  # [C(3),B,num_queries(100),4]
+                outputs_obj_coord = self.obj_bbox_embed(hopd_out).sigmoid()  # [C(3),B,num_queries(100),4]
+                outputs_obj_class = self.obj_class_embed(hopd_out)  # [C(3),B,num_queries(100),num_obj_classes+1(82)]
+                if self.use_matching:
+                    outputs_matching = self.matching_embed(hopd_out)
+                obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
+                outputs_verb_class = self.verb_class_embed(obj_verb_rep)
+                # [C(3),B,num_queries(100),num_verb_classes(29)]
+                out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
+                       'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
+                if self.use_matching:
+                    out['pred_matching_logits'] = outputs_matching[-1]
+                if self.aux_loss:
+                    if self.use_matching:
+                        out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
+                                                                outputs_sub_coord, outputs_obj_coord,
+                                                                outputs_matching)
+                    else:
+                        out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
+                                                                outputs_sub_coord, outputs_obj_coord)
+                outs.append(out)
+
+            for i in range(2):
+                outputs_sub_coord = self.sub_bbox_embed(hopd_outs[i]).sigmoid()  # [C(3),B,num_queries(100),4]
+                outputs_obj_coord = self.obj_bbox_embed(hopd_outs[i]).sigmoid()  # [C(3),B,num_queries(100),4]
+                outputs_obj_class = self.obj_class_embed(hopd_outs[i])  # [C(3),B,num_queries(100),num_obj_classes+1(82)]
+                if self.use_matching:
+                    outputs_matching = self.matching_embed(hopd_outs[i])
+                obj_verb_rep_compo = torch.cat((hopd_outs[i], interaction_decoder_outs[1-i]), 3)
+                outputs_verb_class_compo = self.verb_class_embed(obj_verb_rep_compo)
+                out = {'pred_obj_logits': outs[i]['pred_obj_logits'], 'pred_verb_logits': outputs_verb_class_compo[-1],
+                       'pred_sub_boxes': outs[i]['pred_sub_boxes'], 'pred_obj_boxes': outs[i]['pred_obj_boxes']}
+                if self.use_matching:
+                    out['pred_matching_logits'] = outputs_matching[-1]
+                if self.aux_loss:
+                    if self.use_matching:
+                        out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class_compo,
+                                                                outputs_sub_coord, outputs_obj_coord,
+                                                                outputs_matching)
+                    else:
+                        out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class_compo,
+                                                                outputs_sub_coord, outputs_obj_coord)
+                outs.append(out)
+
+            return outs
+        else:
+            return self.forward_eval(samples)
+
+    def forward_eval(self, samples):
+        if not isinstance(samples, NestedTensor):
+            samples = nested_tensor_from_tensor_list(samples)
+        features, pos = self.backbone(samples)
+        # pos:[B,hidden_dim(256),15,20]
+        src, mask = features[-1].decompose()  # src:[B,2048,15,20],mask:[B,15,20]
+        assert mask is not None
+        hopd_out, interaction_decoder_out = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[:2]
+        # self.input_proj(src):[B,256,15,20]
+        # hopd_out, interaction_decoder_out:[C(3),B,num_queries(100),hidden_dim(256)]
+        outputs_sub_coord = self.sub_bbox_embed(hopd_out).sigmoid()  # [C(3),B,num_queries(100),4]
+        obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
+        outputs_obj_coord = self.obj_bbox_embed(hopd_out).sigmoid()
+        outputs_obj_class = self.obj_class_embed(hopd_out)
+        if self.use_matching:
+            outputs_matching = self.matching_embed(hopd_out)
+
+        outputs_verb_class = self.verb_class_embed(obj_verb_rep)
+        # [C(3),B,num_queries(100),num_verb_classes(29)]
+        out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
+               'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
+        if self.use_matching:
+            out['pred_matching_logits'] = outputs_matching[-1]
+
+        if self.aux_loss:
+            if self.use_matching:
+                out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
+                                                        outputs_sub_coord, outputs_obj_coord,
+                                                        outputs_matching)
+            else:
+                out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
+                                                        outputs_sub_coord, outputs_obj_coord)
+
+        return out
+
+    @torch.jit.unused
+    def _set_aux_loss(self, outputs_obj_class, outputs_verb_class, outputs_sub_coord, outputs_obj_coord, outputs_matching=None):
+        min_dec_layers_num = min(self.dec_layers_hopd, self.dec_layers_interaction)
+        if self.use_matching:
+            return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c,
+                     'pred_obj_boxes': d, 'pred_matching_logits': e}
+                    for a, b, c, d, e in zip(outputs_obj_class[-min_dec_layers_num : -1], outputs_verb_class[-min_dec_layers_num : -1],
+                                             outputs_sub_coord[-min_dec_layers_num : -1], outputs_obj_coord[-min_dec_layers_num : -1],
+                                             outputs_matching[-min_dec_layers_num : -1])]
+        else:
+            return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c, 'pred_obj_boxes': d}
+                    for a, b, c, d in zip(outputs_obj_class[-min_dec_layers_num : -1], outputs_verb_class[-min_dec_layers_num : -1],
                                           outputs_sub_coord[-min_dec_layers_num : -1], outputs_obj_coord[-min_dec_layers_num : -1])]
 
 
@@ -118,22 +335,22 @@ class SetCriterionHOI(nn.Module):
         self.alpha = args.alpha
 
         if args.dataset_file == 'hico':
-            self.obj_nums_init = [1811, 9462, 2415, 7249, 1665, 3587, 1396, 1086, 10369, 800, \
-                                  287, 77, 332, 2352, 974, 470, 1386, 4889, 1675, 1131, \
-                                  1642, 185, 92, 717, 2228, 4396, 275, 1236, 1447, 1207, \
-                                  2949, 2622, 1689, 2345, 1863, 408, 5594, 1178, 562, 1479, \
-                                  988, 1057, 419, 1451, 504, 177, 1358, 429, 448, 186, \
-                                  121, 441, 735, 706, 868, 1238, 1838, 1224, 262, 517, \
-                                  5787, 200, 529, 1337, 146, 272, 417, 1277, 31, 213, \
+            self.obj_nums_init = [1811, 9462, 2415, 7249, 1665, 3587, 1396, 1086, 10369, 800,
+                                  287, 77, 332, 2352, 974, 470, 1386, 4889, 1675, 1131,
+                                  1642, 185, 92, 717, 2228, 4396, 275, 1236, 1447, 1207,
+                                  2949, 2622, 1689, 2345, 1863, 408, 5594, 1178, 562, 1479,
+                                  988, 1057, 419, 1451, 504, 177, 1358, 429, 448, 186,
+                                  121, 441, 735, 706, 868, 1238, 1838, 1224, 262, 517,
+                                  5787, 200, 529, 1337, 146, 272, 417, 1277, 31, 213,
                                   7, 102, 102, 2424, 606, 215, 509, 529, 102, 572]
         elif args.dataset_file == 'vcoco':
-            self.obj_nums_init = [5397, 238, 332, 321, 5, 6, 45, 90, 59, 20, \
-                                  13, 5, 6, 313, 28, 25, 46, 277, 20, 16, \
-                                  154, 0, 7, 13, 356, 191, 458, 66, 337, 1364, \
-                                  1382, 958, 1166, 68, 258, 221, 1317, 1428, 759, 201, \
-                                  190, 444, 274, 587, 124, 107, 102, 37, 226, 16, \
-                                  30, 22, 187, 320, 222, 465, 893, 213, 56, 322, \
-                                  306, 13, 55, 834, 23, 104, 38, 861, 11, 27, \
+            self.obj_nums_init = [5397, 238, 332, 321, 5, 6, 45, 90, 59, 20,
+                                  13, 5, 6, 313, 28, 25, 46, 277, 20, 16,
+                                  154, 0, 7, 13, 356, 191, 458, 66, 337, 1364,
+                                  1382, 958, 1166, 68, 258, 221, 1317, 1428, 759, 201,
+                                  190, 444, 274, 587, 124, 107, 102, 37, 226, 16,
+                                  30, 22, 187, 320, 222, 465, 893, 213, 56, 322,
+                                  306, 13, 55, 834, 23, 104, 38, 861, 11, 27,
                                   0, 16, 22, 405, 50, 14, 145, 63, 9, 11]
         else:
             raise
@@ -141,21 +358,21 @@ class SetCriterionHOI(nn.Module):
         self.obj_nums_init.append(3 * sum(self.obj_nums_init))  # 3 times fg for bg init
 
         if args.dataset_file == 'hico':
-            self.verb_nums_init = [67, 43, 157, 321, 664, 50, 232, 28, 5342, 414, \
-                                   49, 105, 26, 78, 157, 408, 358, 129, 121, 131, \
-                                   275, 1309, 3, 799, 2338, 128, 633, 79, 435, 1, \
-                                   905, 19, 319, 47, 816, 234, 17958, 52, 97, 648, \
-                                   61, 1430, 13, 1862, 299, 123, 52, 328, 121, 752, \
-                                   111, 30, 293, 6, 193, 32, 4, 15421, 795, 82, \
-                                   30, 10, 149, 24, 59, 504, 57, 339, 62, 38, \
-                                   472, 128, 672, 1506, 16, 275, 16092, 757, 530, 380, \
-                                   132, 68, 20, 111, 2, 160, 3209, 12246, 5, 44, \
-                                   18, 7, 5, 4815, 1302, 69, 37, 25, 5048, 424, \
-                                   1, 235, 150, 131, 383, 72, 76, 139, 258, 464, \
+            self.verb_nums_init = [67, 43, 157, 321, 664, 50, 232, 28, 5342, 414,
+                                   49, 105, 26, 78, 157, 408, 358, 129, 121, 131,
+                                   275, 1309, 3, 799, 2338, 128, 633, 79, 435, 1,
+                                   905, 19, 319, 47, 816, 234, 17958, 52, 97, 648,
+                                   61, 1430, 13, 1862, 299, 123, 52, 328, 121, 752,
+                                   111, 30, 293, 6, 193, 32, 4, 15421, 795, 82,
+                                   30, 10, 149, 24, 59, 504, 57, 339, 62, 38,
+                                   472, 128, 672, 1506, 16, 275, 16092, 757, 530, 380,
+                                   132, 68, 20, 111, 2, 160, 3209, 12246, 5, 44,
+                                   18, 7, 5, 4815, 1302, 69, 37, 25, 5048, 424,
+                                   1, 235, 150, 131, 383, 72, 76, 139, 258, 464,
                                    872, 360, 1917, 1, 3775, 1206, 1]
         elif args.dataset_file == 'vcoco':
-            self.verb_nums_init = [4001, 4598, 1989, 488, 656, 3825, 367, 367, 677, 677, \
-                                   700, 471, 354, 498, 300, 313, 300, 300, 622, 458, \
+            self.verb_nums_init = [4001, 4598, 1989, 488, 656, 3825, 367, 367, 677, 677,
+                                   700, 471, 354, 498, 300, 313, 300, 300, 622, 458,
                                    500, 498, 489, 1545, 133, 142, 38, 116, 388]
         else:
             raise
@@ -458,15 +675,26 @@ def build(args):
 
     cdn = build_cdn(args)
 
-    model = CDNHOI(
-        backbone,
-        cdn,
-        num_obj_classes=args.num_obj_classes,
-        num_verb_classes=args.num_verb_classes,
-        num_queries=args.num_queries,
-        aux_loss=args.aux_loss,
-        args=args
-    )
+    if args.compo:
+        model = CDNCompo(
+            backbone,
+            cdn,
+            num_obj_classes=args.num_obj_classes,
+            num_verb_classes=args.num_verb_classes,
+            num_queries=args.num_queries,
+            aux_loss=args.aux_loss,
+            args=args
+        )
+    else:
+        model = CDNHOI(
+            backbone,
+            cdn,
+            num_obj_classes=args.num_obj_classes,
+            num_verb_classes=args.num_verb_classes,
+            num_queries=args.num_queries,
+            aux_loss=args.aux_loss,
+            args=args
+        )
 
     matcher = build_matcher(args)
     weight_dict = {}

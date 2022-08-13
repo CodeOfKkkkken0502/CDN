@@ -22,6 +22,7 @@ from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate,
                        is_dist_avail_and_initialized)
+from models.hoi import CDNCompo, CDNHOI, CDNHOI2
 
 
 class CDNHOI(nn.Module):
@@ -320,7 +321,7 @@ def main(args):
     args.masks = False
     backbone = build_backbone(args)
     cdn = build_cdn(args)
-    model = CDNHOI(
+    model = CDNCompo(
         backbone,
         cdn,
         num_obj_classes=len(valid_obj_ids) + 1,

@@ -1,4 +1,5 @@
 import argparse
+import pdb
 import time
 import datetime
 import random
@@ -120,7 +121,7 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
-    parser.add_argument('--num_workers', default=2, type=int)
+    parser.add_argument('--num_workers', default=4, type=int)
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
@@ -146,6 +147,8 @@ def get_args_parser():
     parser.add_argument('--nms_alpha', default=1.0, type=float)
     parser.add_argument('--nms_beta', default=0.5, type=float)
     parser.add_argument('--json_file', default='results.json', type=str)
+
+    parser.add_argument('--compo', action='store_true', help='Use compositional model')
 
     return parser
 
@@ -195,19 +198,35 @@ def main(args):
 
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
-
-    if args.distributed:
-        sampler_train = DistributedSampler(dataset_train)
-        sampler_val = DistributedSampler(dataset_val, shuffle=False)
+    if args.compo:
+        args.batch_size = 1
+        dataset_train_sub1, dataset_train_sub2 = torch.utils.data.random_split(dataset_train, [int(len(dataset_train)/2), len(dataset_train)-int(len(dataset_train)/2)])
+        if args.distributed:
+            sampler_train_sub1 = DistributedSampler(dataset_train_sub1)
+            sampler_train_sub2 = DistributedSampler(dataset_train_sub2)
+            sampler_val = DistributedSampler(dataset_val, shuffle=False)
+        else:
+            sampler_train_sub1 = torch.utils.data.RandomSampler(dataset_train_sub1)
+            sampler_train_sub2 = torch.utils.data.RandomSampler(dataset_train_sub2)
+            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        batch_sampler_train_sub1 = torch.utils.data.BatchSampler(sampler_train_sub1, args.batch_size, drop_last=True)
+        batch_sampler_train_sub2 = torch.utils.data.BatchSampler(sampler_train_sub2, args.batch_size, drop_last=True)
+        data_loader_train_sub1 = DataLoader(dataset_train_sub1, batch_sampler=batch_sampler_train_sub1,
+                                       collate_fn=utils.collate_fn, num_workers=args.num_workers)
+        data_loader_train_sub2 = DataLoader(dataset_train_sub2, batch_sampler=batch_sampler_train_sub2,
+                                       collate_fn=utils.collate_fn, num_workers=args.num_workers)
+        data_loader_train = [data_loader_train_sub1, data_loader_train_sub2]
     else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        if args.distributed:
+            sampler_train = DistributedSampler(dataset_train)
+            sampler_val = DistributedSampler(dataset_val, shuffle=False)
+        else:
+            sampler_train = torch.utils.data.RandomSampler(dataset_train)
+            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, args.batch_size, drop_last=True)
+        data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
+                                       collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
-    batch_sampler_train = torch.utils.data.BatchSampler(
-        sampler_train, args.batch_size, drop_last=True)
-
-    data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
@@ -222,11 +241,13 @@ def main(args):
                 args.resume, map_location='cpu', check_hash=True)
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
+        print('load '+args.resume)
         model_without_ddp.load_state_dict(checkpoint['model'])
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
+            print('start from epoch '+ str(args.start_epoch))
     elif args.pretrained:
         checkpoint = torch.load(args.pretrained, map_location='cpu')
         if args.eval:
@@ -236,6 +257,8 @@ def main(args):
 
     if args.eval:
         test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args)
+        with (output_dir / "log_pretrained.txt").open("a") as f:
+            f.write(json.dumps(test_stats) + "\n")
         return
 
 
@@ -244,13 +267,17 @@ def main(args):
     best_performance = 0
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
-            sampler_train.set_epoch(epoch)
+            if args.compo:
+                sampler_train_sub1.set_epoch(epoch)
+                sampler_train_sub2.set_epoch(epoch)
+            else:
+                sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch,
             args.clip_max_norm)
         lr_scheduler.step()
 
-        if epoch == args.epochs - 1:
+        if args.dataset_file == 'hico':
             checkpoint_path = os.path.join(output_dir, 'checkpoint_last.pth')
             utils.save_on_master({
                 'model': model_without_ddp.state_dict(),
@@ -259,6 +286,16 @@ def main(args):
                 'epoch': epoch,
                 'args': args,
             }, checkpoint_path)
+        else:
+            if epoch == args.epochs - 1:
+                checkpoint_path = os.path.join(output_dir, 'checkpoint_last.pth')
+                utils.save_on_master({
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'epoch': epoch,
+                    'args': args,
+                }, checkpoint_path)
 
 
         if args.freeze_mode == 0 and epoch < args.lr_drop and epoch % 5 != 0:  ## eval every 5 epoch before lr_drop

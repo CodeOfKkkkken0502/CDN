@@ -1,11 +1,12 @@
 import math
 import os
+import pdb
 import sys
 from typing import Iterable
 import numpy as np
 import copy
 import itertools
-
+import json
 import torch
 
 import util.misc as utils
@@ -18,52 +19,131 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     device: torch.device, epoch: int, max_norm: float = 0):
     model.train()
     criterion.train()
-    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger = utils.MetricLogger(delimiter="\t")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     if hasattr(criterion, 'loss_labels'):
         metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     else:
         metric_logger.add_meter('obj_class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 10
+    print_freq = 50
+    if isinstance(data_loader, list):
+        obj_vb_matrix_hico = np.load('data/hico_20160224_det/hico_obj_vb_matrix.npy')
+        obj_vb_matrix_vcoco = np.load('data/v-coco/vcoco_obj_vb_matrix.npy')
+        for data_sub1, data_sub2 in metric_logger.log_every(data_loader, print_freq, header):
+            samples = []
+            targets = []
+            samples.append(data_sub1[0].to(device))
+            samples.append(data_sub2[0].to(device))
+            targets.append([{k: v.to(device) for k, v in t.items() if k != 'filename'} for t in data_sub1[1]])
+            targets.append([{k: v.to(device) for k, v in t.items() if k != 'filename'} for t in data_sub2[1]])
+            for i in range(2):
+                target_compo = copy.deepcopy(targets[i])
+                num_HO_1 = target_compo[0]['verb_labels'].shape[0]
+                num_HO_2 = targets[1 - i][0]['verb_labels'].shape[0]
+                if num_HO_1 > num_HO_2:
+                    padding = torch.zeros([num_HO_1 - num_HO_2, target_compo[0]['verb_labels'].shape[1]]).to(device)
+                    target_compo[0]['verb_labels'] = torch.cat((targets[1 - i][0]['verb_labels'], padding), 0)
+                elif num_HO_1 < num_HO_2:
+                    target_compo[0]['verb_labels'] = targets[1 - i][0]['verb_labels'][0:num_HO_1, :]
+                else:
+                    target_compo[0]['verb_labels'] = targets[1 - i][0]['verb_labels']
 
-    for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
-        samples = samples.to(device)
-        targets = [{k: v.to(device) for k, v in t.items() if k != 'filename'} for t in targets]
+                for j in range(num_HO_1):
+                    obj_index = target_compo[0]['obj_labels'][j]
+                    verb_indices = np.argwhere(target_compo[0]['verb_labels'][j, :].cpu().numpy() == 1).reshape(-1)
+                    if target_compo[0]['verb_labels'].shape[1] == 117:
+                        for k in range(verb_indices.shape[0]):
+                            target_compo[0]['verb_labels'][j, verb_indices[k]] = obj_vb_matrix_hico[obj_index, verb_indices[k]]
+                        if not target_compo[0]['verb_labels'].type(torch.uint8).any():
+                            target_compo[0]['verb_labels'][j, 57] = 1
+                    elif target_compo[0]['verb_labels'].shape[1] == 29:
+                        for k in range(verb_indices.shape[0]):
+                            target_compo[0]['verb_labels'][j, verb_indices[k]] = obj_vb_matrix_vcoco[obj_index, verb_indices[k]]
+                        #if not target_compo[0]['verb_labels'].type(torch.uint8).any():
+                            #target_compo[0]['verb_labels'][j, :] = 0
+                targets.append(target_compo)
 
-        outputs = model(samples)
-        #print(targets)
-        loss_dict = criterion(outputs, targets)
-        weight_dict = criterion.weight_dict
-        losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+            outputs = model(samples)
+            batch_weight = [1, 1, 1, 1]
+            for i in range(len(outputs)):
+                losses_avg = 0
+                loss_dict = criterion(outputs[i], targets[i])
+                weight_dict = criterion.weight_dict
+                losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+                losses_avg += losses
 
-        # reduce losses over all GPUs for logging purposes
-        loss_dict_reduced = utils.reduce_dict(loss_dict)
-        loss_dict_reduced_unscaled = {f'{k}_unscaled': v
-                                      for k, v in loss_dict_reduced.items()}
-        loss_dict_reduced_scaled = {k: v * weight_dict[k]
-                                    for k, v in loss_dict_reduced.items() if k in weight_dict}
-        losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
+                # reduce losses over all GPUs for logging purposes
+                loss_dict_reduced = utils.reduce_dict(loss_dict)
+                loss_dict_reduced_unscaled = {f'{k}_unscaled': v
+                                              for k, v in loss_dict_reduced.items()}
+                loss_dict_reduced_scaled = {k: v * weight_dict[k]
+                                            for k, v in loss_dict_reduced.items() if k in weight_dict}
+                losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
 
-        loss_value = losses_reduced_scaled.item()
+                loss_value = losses_reduced_scaled.item()
 
-        if not math.isfinite(loss_value):
-            print("Loss is {}, stopping training".format(loss_value))
-            print(loss_dict_reduced)
-            sys.exit(1)
+                if not math.isfinite(loss_value):
+                    print("Loss is {}, stopping training".format(loss_value))
+                    print(loss_dict_reduced)
+                    sys.exit(1)
 
-        optimizer.zero_grad()
-        losses.backward()
-        if max_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        optimizer.step()
+            losses_avg = losses_avg / len(outputs)
+            optimizer.zero_grad()
+            losses_avg.backward()
+            if max_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            optimizer.step()
 
-        metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
-        if hasattr(criterion, 'loss_labels'):
-            metric_logger.update(class_error=loss_dict_reduced['class_error'])
-        else:
-            metric_logger.update(obj_class_error=loss_dict_reduced['obj_class_error'])
-        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+            metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
+            if hasattr(criterion, 'loss_labels'):
+                metric_logger.update(class_error=loss_dict_reduced['class_error'])
+            else:
+                metric_logger.update(obj_class_error=loss_dict_reduced['obj_class_error'])
+            metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+    else:
+        for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
+            samples = samples.to(device)
+            targets = [{k: v.to(device) for k, v in t.items() if k != 'filename'} for t in targets]
+            # samples: NestedTensor, samples.mask: tensor[batch_size, H, W], samples.tensors: tensor[batch_size, 3, H, W]
+            # targets: tuple
+            # targets[0:batch_size]: dict{'orig_size': tensor([480, 640]), 'size': tensor([640, 944]), 'boxes': tensor([num_boxes, 4]),
+            # 'labels': tensor([num_boxes]), 'iscrowd': tensor([num_boxes]), 'area': tensor([num_boxes]),
+            # 'filename': 'COCO_train2014_000000323728.jpg', 'obj_labels': tensor([num_objects]), 'verb_labels': tensor([num_objects, 29]),
+            # 'sub_boxes': tensor([num_objects, 4]), 'obj_boxes': tensor([num_objects, 4]), 'matching_labels': tensor([num_objects])}
+            outputs = model(samples)
+
+            loss_dict = criterion(outputs, targets)
+            weight_dict = criterion.weight_dict
+            losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+
+            # reduce losses over all GPUs for logging purposes
+            loss_dict_reduced = utils.reduce_dict(loss_dict)
+            loss_dict_reduced_unscaled = {f'{k}_unscaled': v
+                                          for k, v in loss_dict_reduced.items()}
+            loss_dict_reduced_scaled = {k: v * weight_dict[k]
+                                        for k, v in loss_dict_reduced.items() if k in weight_dict}
+            losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
+
+            loss_value = losses_reduced_scaled.item()
+
+            if not math.isfinite(loss_value):
+                print("Loss is {}, stopping training".format(loss_value))
+                print(loss_dict_reduced)
+                sys.exit(1)
+
+            optimizer.zero_grad()
+            losses.backward()
+            if max_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            optimizer.step()
+
+            metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
+            if hasattr(criterion, 'loss_labels'):
+                metric_logger.update(class_error=loss_dict_reduced['class_error'])
+            else:
+                metric_logger.update(obj_class_error=loss_dict_reduced['obj_class_error'])
+            metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
 
     # gather the stats from all processes
@@ -82,7 +162,7 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     preds = []
     gts = []
     indices = []
-    for samples, targets in metric_logger.log_every(data_loader, 10, header):
+    for samples, targets in metric_logger.log_every(data_loader, 100, header):
         samples = samples.to(device)
 
         outputs = model(samples)
