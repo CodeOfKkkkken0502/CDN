@@ -29,7 +29,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     print_freq = 50
     if isinstance(data_loader, list):
         obj_vb_matrix_hico = np.load('data/hico_20160224_det/hico_obj_vb_matrix.npy')
-        obj_vb_matrix_vcoco = np.load('data/v-coco/vcoco_obj_vb_matrix.npy')
+        obj_vb_matrix_vcoco = np.load('data/v-coco/vcoco_obj_vb_matrix_ver2.npy')
         for data_sub1, data_sub2 in metric_logger.log_every(data_loader, print_freq, header):
             samples = []
             targets = []
@@ -37,6 +37,27 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             samples.append(data_sub2[0].to(device))
             targets.append([{k: v.to(device) for k, v in t.items() if k != 'filename'} for t in data_sub1[1]])
             targets.append([{k: v.to(device) for k, v in t.items() if k != 'filename'} for t in data_sub2[1]])
+            if targets[0][0]['verb_labels'].shape[1] == 117:
+                obj_vb_matrix = obj_vb_matrix_hico
+            elif targets[0][0]['verb_labels'].shape[1] == 29:
+                obj_vb_matrix = obj_vb_matrix_vcoco
+            for i in range(2):
+                target_compo = copy.deepcopy(targets[i])
+                num_HO_1 = target_compo[0]['verb_labels'].shape[0]
+                num_HO_2 = targets[1 - i][0]['verb_labels'].shape[0]
+                verb_list = []
+                for j in range(num_HO_2):
+                    verb_indices = np.argwhere(targets[1 - i][0]['verb_labels'][j, :].cpu().numpy() == 1).reshape(-1)
+                    for verb_index in verb_indices:
+                        verb_list.append(verb_index)
+                for k in range(num_HO_1):
+                    obj_index = target_compo[0]['obj_labels'][k]
+                    target_compo[0]['verb_labels'][k, :] = 0
+                    for verb in verb_list:
+                        target_compo[0]['verb_labels'][k, verb] = obj_vb_matrix[obj_index, verb]
+                    if not target_compo[0]['verb_labels'][k, :].type(torch.uint8).any():
+                        target_compo[0]['matching_labels'][k] = 0
+                        '''
             for i in range(2):
                 target_compo = copy.deepcopy(targets[i])
                 num_HO_1 = target_compo[0]['verb_labels'].shape[0]
@@ -45,33 +66,38 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     padding = torch.zeros([num_HO_1 - num_HO_2, target_compo[0]['verb_labels'].shape[1]]).to(device)
                     target_compo[0]['verb_labels'] = torch.cat((targets[1 - i][0]['verb_labels'], padding), 0)
                 elif num_HO_1 < num_HO_2:
-                    target_compo[0]['verb_labels'] = targets[1 - i][0]['verb_labels'][0:num_HO_1, :]
+                    target_compo[0]['verb_labels'] = copy.deepcopy(targets[1 - i][0]['verb_labels'][0:num_HO_1, :])
                 else:
-                    target_compo[0]['verb_labels'] = targets[1 - i][0]['verb_labels']
-
+                    target_compo[0]['verb_labels'] = copy.deepcopy(targets[1 - i][0]['verb_labels'])
+                
                 for j in range(num_HO_1):
                     obj_index = target_compo[0]['obj_labels'][j]
                     verb_indices = np.argwhere(target_compo[0]['verb_labels'][j, :].cpu().numpy() == 1).reshape(-1)
+                    
                     if target_compo[0]['verb_labels'].shape[1] == 117:
                         for k in range(verb_indices.shape[0]):
                             target_compo[0]['verb_labels'][j, verb_indices[k]] = obj_vb_matrix_hico[obj_index, verb_indices[k]]
-                        if not target_compo[0]['verb_labels'].type(torch.uint8).any():
+                        if not target_compo[0]['verb_labels'][j, :].type(torch.uint8).any():
                             target_compo[0]['verb_labels'][j, 57] = 1
                     elif target_compo[0]['verb_labels'].shape[1] == 29:
                         for k in range(verb_indices.shape[0]):
                             target_compo[0]['verb_labels'][j, verb_indices[k]] = obj_vb_matrix_vcoco[obj_index, verb_indices[k]]
-                        #if not target_compo[0]['verb_labels'].type(torch.uint8).any():
-                            #target_compo[0]['verb_labels'][j, :] = 0
+                        if not target_compo[0]['verb_labels'][j, :].type(torch.uint8).any():
+                            target_compo[0]['matching_labels'][j] = 0
+                        '''
                 targets.append(target_compo)
 
             outputs = model(samples)
-            batch_weight = [1, 1, 1, 1]
+            batch_weight = [1.5, 1.5, 0.5, 0.5]
+            losses_avg = 0
             for i in range(len(outputs)):
-                losses_avg = 0
                 loss_dict = criterion(outputs[i], targets[i])
                 weight_dict = criterion.weight_dict
                 losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+                #losses = losses * batch_weight[i]
+                #print(losses)
                 losses_avg += losses
+                #print(losses_avg)
 
                 # reduce losses over all GPUs for logging purposes
                 loss_dict_reduced = utils.reduce_dict(loss_dict)
@@ -88,6 +114,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     print(loss_dict_reduced)
                     sys.exit(1)
 
+            #print(losses_avg)
             losses_avg = losses_avg / len(outputs)
             optimizer.zero_grad()
             losses_avg.backward()

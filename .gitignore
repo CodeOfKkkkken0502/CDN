@@ -1,0 +1,12 @@
+/.idea
+/__pycache__
+/datasets/__pycache__
+/models/__pycache__
+/data/hico_20160224_det/annotations/
+/data/hico_20160224_det/images/
+/data/hico_20160224_det/tools/
+/logs/07/
+/logs/hico-compo2-0802/
+/params/
+/util/
+/paper_images/

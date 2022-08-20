@@ -287,8 +287,18 @@ def main(args):
                 'args': args,
             }, checkpoint_path)
         else:
-            if epoch == args.epochs - 1:
-                checkpoint_path = os.path.join(output_dir, 'checkpoint_last.pth')
+            if epoch == 49:
+                checkpoint_path = os.path.join(output_dir, 'checkpoint_last_49.pth')
+                utils.save_on_master({
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'epoch': epoch,
+                    'args': args,
+                }, checkpoint_path)
+            elif epoch == args.epochs - 1:
+                checkpoint_name = 'checkpoint_last_'+str(args.epochs)+'.pth'
+                checkpoint_path = os.path.join(output_dir, checkpoint_name)
                 utils.save_on_master({
                     'model': model_without_ddp.state_dict(),
                     'optimizer': optimizer.state_dict(),
