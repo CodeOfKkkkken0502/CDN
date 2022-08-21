@@ -1,0 +1,1 @@
+log命名格式：orig=原版cdn，compo=组合式，de=decouple，re=remove，1505/1802=batch weight（1.5&0.5，1.8&0.2），最后数字=mAP
