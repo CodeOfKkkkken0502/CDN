@@ -12,7 +12,7 @@ class CDN(nn.Module):
                  num_dec_layers_hopd=3, num_dec_layers_interaction=3, 
                  dim_feedforward=2048, dropout=0.1,
                  activation="relu", normalize_before=False,
-                 return_intermediate_dec=False):
+                 return_intermediate_dec=False, decouple=False):
         super().__init__()
 
         encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
@@ -38,6 +38,8 @@ class CDN(nn.Module):
         self.d_model = d_model
         self.nhead = nhead
 
+        self.decouple = decouple
+
     def _reset_parameters(self):
         for p in self.parameters():
             if p.dim() > 1:
@@ -56,9 +58,11 @@ class CDN(nn.Module):
                           pos=pos_embed, query_pos=query_embed)
         hopd_out = hopd_out.transpose(1, 2)
 
-        # interaction_query_embed = query_embed
-        interaction_query_embed = hopd_out[-1]
-        interaction_query_embed = interaction_query_embed.permute(1, 0, 2)
+        if self.decouple:
+            interaction_query_embed = query_embed
+        else:
+            interaction_query_embed = hopd_out[-1]
+            interaction_query_embed = interaction_query_embed.permute(1, 0, 2)
 
         interaction_tgt = torch.zeros_like(interaction_query_embed)
         interaction_decoder_out = self.interaction_decoder(interaction_tgt, memory, memory_key_padding_mask=mask,
@@ -291,6 +295,7 @@ def build_cdn(args):
         num_dec_layers_interaction=args.dec_layers_interaction,
         normalize_before=args.pre_norm,
         return_intermediate_dec=True,
+        decouple=args.decouple,
     )
 
 

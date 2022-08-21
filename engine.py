@@ -16,7 +16,8 @@ from datasets.vcoco_eval import VCOCOEvaluator
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, max_norm: float = 0):
+                    device: torch.device, epoch: int, max_norm: float = 0,
+                    remove: bool = False, batch_weight_mode: int = 0):
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="\t")
@@ -54,7 +55,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     obj_index = target_compo[0]['obj_labels'][k]
                     target_compo[0]['verb_labels'][k, :] = 0
                     for verb in verb_list:
-                        target_compo[0]['verb_labels'][k, verb] = obj_vb_matrix[obj_index, verb]
+                        if remove:
+                            target_compo[0]['verb_labels'][k, verb] = obj_vb_matrix[obj_index, verb]
+                        else:
+                            target_compo[0]['verb_labels'][k, verb] = 1
                     if not target_compo[0]['verb_labels'][k, :].type(torch.uint8).any():
                         target_compo[0]['matching_labels'][k] = 0
                         '''
@@ -88,16 +92,15 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 targets.append(target_compo)
 
             outputs = model(samples)
-            batch_weight = [1.5, 1.5, 0.5, 0.5]
+            batch_weight_list = [[1, 1, 1, 1], [1.5, 1.5, 0.5, 0.5], [1.8, 1.8, 0.2, 0.2]]
+            batch_weight = batch_weight_list[batch_weight_mode]
             losses_avg = 0
             for i in range(len(outputs)):
                 loss_dict = criterion(outputs[i], targets[i])
                 weight_dict = criterion.weight_dict
                 losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
-                #losses = losses * batch_weight[i]
-                #print(losses)
+                losses = losses * batch_weight[i]
                 losses_avg += losses
-                #print(losses_avg)
 
                 # reduce losses over all GPUs for logging purposes
                 loss_dict_reduced = utils.reduce_dict(loss_dict)
@@ -114,7 +117,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     print(loss_dict_reduced)
                     sys.exit(1)
 
-            #print(losses_avg)
             losses_avg = losses_avg / len(outputs)
             optimizer.zero_grad()
             losses_avg.backward()

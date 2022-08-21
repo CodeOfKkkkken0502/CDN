@@ -149,6 +149,9 @@ def get_args_parser():
     parser.add_argument('--json_file', default='results.json', type=str)
 
     parser.add_argument('--compo', action='store_true', help='Use compositional model')
+    parser.add_argument('--decouple', action='store_true', help='Decouple HO-pair and interaction representations')
+    parser.add_argument('--remove', action='store_true', help='Remove infeasible compositions')
+    parser.add_argument('--batch_weight_mode', default=0, type=int, help='Weights for original and composed samples')
 
     return parser
 
@@ -274,7 +277,7 @@ def main(args):
                 sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch,
-            args.clip_max_norm)
+            args.clip_max_norm, args.remove, args.batch_weight_mode)
         lr_scheduler.step()
 
         if args.dataset_file == 'hico':
