@@ -5,6 +5,11 @@
 /data/hico_20160224_det/annotations/
 /data/hico_20160224_det/images/
 /data/hico_20160224_det/tools/
+/data/v-coco/annotations/
+/data/v-coco/coco/
+/data/v-coco/data/
+/data/v-coco/images/
+/data/v-coco/pycocotools_/
 /logs/07/
 /logs/hico-compo2-0802/
 /params/

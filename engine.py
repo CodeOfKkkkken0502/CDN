@@ -30,7 +30,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     print_freq = 50
     if isinstance(data_loader, list):
         obj_vb_matrix_hico = np.load('data/hico_20160224_det/hico_obj_vb_matrix.npy')
-        obj_vb_matrix_vcoco = np.load('data/v-coco/vcoco_obj_vb_matrix_ver2.npy')
+        obj_vb_matrix_vcoco = np.load('data/v-coco/vcoco_obj_vb_matrix_ver3.npy')
         for data_sub1, data_sub2 in metric_logger.log_every(data_loader, print_freq, header):
             samples = []
             targets = []

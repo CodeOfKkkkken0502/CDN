@@ -152,6 +152,7 @@ def get_args_parser():
     parser.add_argument('--decouple', action='store_true', help='Decouple HO-pair and interaction representations')
     parser.add_argument('--remove', action='store_true', help='Remove infeasible compositions')
     parser.add_argument('--batch_weight_mode', default=0, type=int, help='Weights for original and composed samples')
+    parser.add_argument('--fusion_mode', default=0, type=int, help='Way to fuse HO-pair and interaction representations')
 
     return parser
 
