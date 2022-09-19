@@ -9,7 +9,7 @@ import json
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-
+from torch.utils.tensorboard import SummaryWriter
 import datasets
 import util.misc as utils
 from datasets import build_dataset
@@ -160,6 +160,9 @@ def get_args_parser():
 def main(args):
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
+    tb_writer = None
+    if utils.get_rank() == 0:
+        tb_writer = SummaryWriter(log_dir='logs/tensorboard')
 
     if args.frozen_weights is not None:
         assert args.masks, "Frozen training is meant for segmentation only"
@@ -203,7 +206,6 @@ def main(args):
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
     if args.compo:
-        args.batch_size = 1
         dataset_train_sub1, dataset_train_sub2 = torch.utils.data.random_split(dataset_train, [int(len(dataset_train)/2), len(dataset_train)-int(len(dataset_train)/2)])
         if args.distributed:
             sampler_train_sub1 = DistributedSampler(dataset_train_sub1)
@@ -213,8 +215,8 @@ def main(args):
             sampler_train_sub1 = torch.utils.data.RandomSampler(dataset_train_sub1)
             sampler_train_sub2 = torch.utils.data.RandomSampler(dataset_train_sub2)
             sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-        batch_sampler_train_sub1 = torch.utils.data.BatchSampler(sampler_train_sub1, args.batch_size, drop_last=True)
-        batch_sampler_train_sub2 = torch.utils.data.BatchSampler(sampler_train_sub2, args.batch_size, drop_last=True)
+        batch_sampler_train_sub1 = torch.utils.data.BatchSampler(sampler_train_sub1, batch_size=1, drop_last=True)
+        batch_sampler_train_sub2 = torch.utils.data.BatchSampler(sampler_train_sub2, batch_size=1, drop_last=True)
         data_loader_train_sub1 = DataLoader(dataset_train_sub1, batch_sampler=batch_sampler_train_sub1,
                                        collate_fn=utils.collate_fn, num_workers=args.num_workers)
         data_loader_train_sub2 = DataLoader(dataset_train_sub2, batch_sampler=batch_sampler_train_sub2,
@@ -279,7 +281,10 @@ def main(args):
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch,
             args.clip_max_norm, args.remove, args.batch_weight_mode)
-        lr_scheduler.step()
+        if tb_writer is not None:
+            for k, meter in train_stats.items():
+                tb_writer.add_scalar(k, meter, epoch)
+            lr_scheduler.step()
 
         if args.dataset_file == 'hico':
             checkpoint_path = os.path.join(output_dir, 'checkpoint_last.pth')
@@ -291,16 +296,7 @@ def main(args):
                 'args': args,
             }, checkpoint_path)
         else:
-            if epoch == 49:
-                checkpoint_path = os.path.join(output_dir, 'checkpoint_last_49.pth')
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }, checkpoint_path)
-            elif epoch == args.epochs - 1:
+            if epoch == args.epochs - 1:
                 checkpoint_name = 'checkpoint_last_'+str(args.epochs)+'.pth'
                 checkpoint_path = os.path.join(output_dir, checkpoint_name)
                 utils.save_on_master({
@@ -318,6 +314,9 @@ def main(args):
             continue
 
         test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args)
+        if tb_writer is not None:
+            for k, meter in test_stats.items():
+                tb_writer.add_scalar(k, meter, epoch)
         coco_evaluator = None
         if args.dataset_file == 'hico':
             performance = test_stats['mAP']
