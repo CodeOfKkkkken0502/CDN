@@ -358,7 +358,8 @@ def main(args):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
-    tb_writer.close()
+    if tb_writer is not None:
+        tb_writer.close()
 
 
 if __name__ == '__main__':
