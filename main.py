@@ -161,7 +161,7 @@ def main(args):
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
     tb_writer = None
-    if utils.get_rank() == 0:
+    if utils.is_main_process():
         tb_writer = SummaryWriter(log_dir='logs/tensorboard')
 
     if args.frozen_weights is not None:
@@ -283,8 +283,8 @@ def main(args):
             args.clip_max_norm, args.remove, args.batch_weight_mode)
         if tb_writer is not None:
             for k, meter in train_stats.items():
-                tb_writer.add_scalar(k, meter, epoch)
-            lr_scheduler.step()
+                tb_writer.add_scalar(k, meter, epoch+(args.freeze_mode*90))
+        lr_scheduler.step()
 
         if args.dataset_file == 'hico':
             checkpoint_path = os.path.join(output_dir, 'checkpoint_last.pth')
@@ -316,7 +316,7 @@ def main(args):
         test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args)
         if tb_writer is not None:
             for k, meter in test_stats.items():
-                tb_writer.add_scalar(k, meter, epoch)
+                tb_writer.add_scalar(k, meter, epoch+(args.freeze_mode*90))
         coco_evaluator = None
         if args.dataset_file == 'hico':
             performance = test_stats['mAP']
@@ -358,6 +358,7 @@ def main(args):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+    tb_writer.close()
 
 
 if __name__ == '__main__':

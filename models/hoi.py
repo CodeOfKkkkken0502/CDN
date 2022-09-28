@@ -1,5 +1,3 @@
-from scipy.optimize import linear_sum_assignment
-
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -300,7 +298,6 @@ class CDNCompo(nn.Module):
         # hopd_out, interaction_decoder_out:[C(3),B,num_queries(100),hidden_dim(256)]
         outputs_sub_coord = self.sub_bbox_embed(hopd_out).sigmoid()  # [C(3),B,num_queries(100),4]
         obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
-        #obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
         outputs_obj_coord = self.obj_bbox_embed(hopd_out).sigmoid()
         outputs_obj_class = self.obj_class_embed(hopd_out)
         if self.use_matching:
@@ -723,7 +720,7 @@ def build(args):
             args=args
         )
     else:
-        model = CDNHOI2(
+        model = CDNHOI(
             backbone,
             cdn,
             num_obj_classes=args.num_obj_classes,
