@@ -181,7 +181,7 @@ class CDNCompo(nn.Module):
     def forward(self, samples):
         # hopd_outs = []
         # interaction_decoder_outs = []
-        outs = []
+        #outs = []
         if isinstance(samples, list):
             sample = samples[0]
             features, pos = self.backbone(sample)
@@ -215,7 +215,8 @@ class CDNCompo(nn.Module):
                 else:
                     out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
                                                             outputs_sub_coord, outputs_obj_coord)
-            outs.append(out)
+            return out, hopd_out, interaction_decoder_out
+            #outs.append(out)
             '''
             for i in range(2):
                 outputs_sub_coord = self.sub_bbox_embed(hopd_outs[i]).sigmoid()  # [C(3),B,num_queries(100),4]
@@ -250,7 +251,7 @@ class CDNCompo(nn.Module):
                                                                 outputs_sub_coord, outputs_obj_coord)
                 outs.append(out)
             '''
-
+            '''
             if self.fusion_mode:
                 interaction_decoder_out_minus = interaction_decoder_out - hopd_out
                 interaction_decoder_out_compo = torch.stack(
@@ -283,8 +284,56 @@ class CDNCompo(nn.Module):
                                                             outputs_sub_coord, outputs_obj_coord)
             outs.append(out)
             return outs
+            '''
         else:
             return self.forward_eval(samples)
+
+    def forward_compo(self, hopd_out, interaction_decoder_out, indices):
+        # indices: [(tensor([27, 37]), tensor([1, 0])), (tensor([95]), tensor([0]))] (num_hois * index_of_matched_query),(num_hois * index_of_gt)
+        hopd_out_compo = []
+        interaction_decoder_out_compo = []
+        num_HO = (len(indices[0][0]), len(indices[1][0]))
+        if 0 not in num_HO:
+            for i in range(2):
+                hopd_out_compo_list = []
+                interaction_decoder_out_compo_list = []
+                for j in range(num_HO[i]):
+                    hopd_out_1 = hopd_out[:, i, indices[i][0][j], :]
+                    for k in range(num_HO[1-i]):
+                        interaction_decoder_out_2 = interaction_decoder_out[:, 1-i, indices[1-i][0][k], :]
+                        hopd_out_compo_list.append(hopd_out_1)
+                        interaction_decoder_out_compo_list.append(interaction_decoder_out_2)
+                hopd_out_compo_1 = torch.stack(hopd_out_compo_list, dim=1)
+                hopd_out_compo.append(hopd_out_compo_1)
+                interaction_decoder_out_compo_1 = torch.stack(interaction_decoder_out_compo_list, dim=1)
+                interaction_decoder_out_compo.append(interaction_decoder_out_compo_1)
+            hopd_out_compo = torch.stack(hopd_out_compo, dim=1)
+            interaction_decoder_out_compo = torch.stack(interaction_decoder_out_compo, dim=1)
+        else:
+            hopd_out_compo = hopd_out
+            interaction_decoder_out_compo = torch.stack((interaction_decoder_out[:,1,:,:],interaction_decoder_out[:,0,:,:]),dim=1)
+        obj_verb_rep_compo = torch.cat((hopd_out_compo, interaction_decoder_out_compo), dim=3)
+        outputs_sub_coord = self.sub_bbox_embed(hopd_out_compo).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
+        outputs_obj_coord = self.obj_bbox_embed(hopd_out_compo).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
+        outputs_obj_class = self.obj_class_embed(
+            hopd_out_compo)  # [num_decoder_layers(3),B,num_queries(100),num_obj_classes+1(82)]
+        if self.use_matching:
+            outputs_matching = self.matching_embed(hopd_out_compo)
+        outputs_verb_class = self.verb_class_embed(obj_verb_rep_compo)
+        # [num_decoder_layers(3),B,num_queries(100),num_verb_classes(29)]
+        out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
+               'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
+        if self.use_matching:
+            out['pred_matching_logits'] = outputs_matching[-1]
+        if self.aux_loss:
+            if self.use_matching:
+                out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
+                                                        outputs_sub_coord, outputs_obj_coord,
+                                                        outputs_matching)
+            else:
+                out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
+                                                        outputs_sub_coord, outputs_obj_coord)
+        return out
 
     def forward_eval(self, samples):
         if not isinstance(samples, NestedTensor):

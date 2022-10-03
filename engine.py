@@ -51,7 +51,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 num_HO_2 = targets[0][1 - i]['verb_labels'].shape[0]
                 target_compo['verb_labels'] = targets[0][1 - i]['verb_labels'].repeat(num_HO_1, 1)
                 target_compo['matching_labels'] = torch.ones(num_HO_1 * num_HO_2).to(device)
-                obj_labels_repeat = torch.tensor(torch.Tensor(0), dtype=torch.int64).to(device)
+                obj_labels_repeat = torch.LongTensor(0).to(device)
                 sub_boxes_repeat = torch.Tensor(0, 4).to(device)
                 obj_boxes_repeat = torch.Tensor(0, 4).to(device)
                 for j in range(num_HO_1):
@@ -109,7 +109,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             targets.append((targets_compo[0], targets_compo[1]))
             '''
 
-            outputs = model(samples)
+            outputs = []
+            output, hopd_out, interaction_decoder_out = model(samples)
+            outputs.append(output)
+            output_without_aux = {k: v for k, v in output.items() if k != 'aux_outputs'}
+            indices = criterion.matcher(output_without_aux, targets[0])
+            output_compo = model.module.forward_compo(hopd_out, interaction_decoder_out, indices)
+            outputs.append(output_compo)
             batch_weight_list = [[1, 1],
                                  [1.5, 0.5],
                                  [1.8, 0.2],
