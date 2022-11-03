@@ -12,7 +12,7 @@ class CDN(nn.Module):
                  num_dec_layers_hopd=3, num_dec_layers_interaction=3, 
                  dim_feedforward=2048, dropout=0.1,
                  activation="relu", normalize_before=False,
-                 return_intermediate_dec=False, decouple=False):
+                 return_intermediate_dec=False, decouple=False, recouple=False):
         super().__init__()
 
         encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
@@ -39,6 +39,7 @@ class CDN(nn.Module):
         self.nhead = nhead
 
         self.decouple = decouple
+        self.recouple = recouple
 
     def _reset_parameters(self):
         for p in self.parameters():
@@ -63,13 +64,26 @@ class CDN(nn.Module):
         else:
             interaction_query_embed = hopd_out[-1]
             interaction_query_embed = interaction_query_embed.permute(1, 0, 2)
+            if self.recouple:
+                if bs == 1:
+                    interaction_query_embed_compo = interaction_query_embed
+                else:
+                    interaction_query_embed_compo = torch.stack((interaction_query_embed[:,1,:],interaction_query_embed[:,0,:]),dim=1)
+
 
         interaction_tgt = torch.zeros_like(interaction_query_embed)
         interaction_decoder_out = self.interaction_decoder(interaction_tgt, memory, memory_key_padding_mask=mask,
                                   pos=pos_embed, query_pos=interaction_query_embed)
         interaction_decoder_out = interaction_decoder_out.transpose(1, 2)
 
-        return hopd_out, interaction_decoder_out, memory.permute(1, 2, 0).view(bs, c, h, w)
+        if self.recouple:
+            interaction_tgt = torch.zeros_like(interaction_query_embed)
+            interaction_decoder_out_compo = self.interaction_decoder(interaction_tgt, memory, memory_key_padding_mask=mask,
+                                                                     pos=pos_embed, query_pos=interaction_query_embed_compo)
+            interaction_decoder_out_compo = interaction_decoder_out_compo.transpose(1, 2)
+            return hopd_out, interaction_decoder_out, interaction_decoder_out_compo
+        else:
+            return hopd_out, interaction_decoder_out, memory.permute(1, 2, 0).view(bs, c, h, w)
 
 
 class TransformerEncoder(nn.Module):
@@ -296,6 +310,7 @@ def build_cdn(args):
         normalize_before=args.pre_norm,
         return_intermediate_dec=True,
         decouple=args.decouple,
+        recouple=args.recouple,
     )
 
 

@@ -121,7 +121,7 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
-    parser.add_argument('--num_workers', default=4, type=int)
+    parser.add_argument('--num_workers', default=1, type=int)
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
@@ -150,9 +150,12 @@ def get_args_parser():
 
     parser.add_argument('--compo', action='store_true', help='Use compositional model')
     parser.add_argument('--decouple', action='store_true', help='Decouple HO-pair and interaction representations')
-    parser.add_argument('--remove', action='store_true', help='Remove infeasible compositions')
+    parser.add_argument('--remove', default=True, help='Remove infeasible compositions')
     parser.add_argument('--batch_weight_mode', default=0, type=int, help='Weights for original and composed samples')
     parser.add_argument('--fusion_mode', default=0, type=int, help='Way to fuse HO-pair and interaction representations')
+    parser.add_argument('--uncertainty', action='store_true', help='Use uncertainty quantification')
+    parser.add_argument('--label_smoothing', action='store_true', help='Label smoothing for composite samples')
+    parser.add_argument('--recouple', action='store_true', help='Use hopd_out_1 to initialize interaction query 2')
 
     return parser
 
@@ -162,7 +165,7 @@ def main(args):
     print("git:\n  {}\n".format(utils.get_sha()))
     tb_writer = None
     if utils.is_main_process():
-        tb_writer = SummaryWriter(log_dir='logs/tensorboard')
+        tb_writer = SummaryWriter(log_dir=args.output_dir)
 
     if args.frozen_weights is not None:
         assert args.masks, "Frozen training is meant for segmentation only"
@@ -280,7 +283,7 @@ def main(args):
                 sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch,
-            args.clip_max_norm, args.remove, args.batch_weight_mode)
+            args.clip_max_norm, args.remove, args.batch_weight_mode, args.label_smoothing)
         if tb_writer is not None:
             for k, meter in train_stats.items():
                 tb_writer.add_scalar(k, meter, epoch+(args.freeze_mode*90))

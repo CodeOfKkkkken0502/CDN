@@ -1,3 +1,5 @@
+import sys
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -177,6 +179,10 @@ class CDNCompo(nn.Module):
         self.dec_layers_interaction = args.dec_layers_interaction
         if self.use_matching:
             self.matching_embed = nn.Linear(hidden_dim, 2)
+        self.uncertainty = args.uncertainty
+        self.recouple = args.recouple
+        if self.uncertainty:
+            self.uctt = MLP_UCTT(num_verb_classes, hidden_dim, num_verb_classes, 1, num_queries)
 
     def forward(self, samples):
         # hopd_outs = []
@@ -189,7 +195,11 @@ class CDNCompo(nn.Module):
             src, mask = features[-1].decompose()
             # src:[B,2048,15,20],mask:[B,15,20]
             assert mask is not None
-            hopd_out, interaction_decoder_out = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[:2]
+            if self.recouple:
+                hopd_out, interaction_decoder_out, interaction_decoder_out_compo = self.transformer(self.input_proj(src), mask,
+                                                                     self.query_embed.weight, pos[-1])
+            else:
+                hopd_out, interaction_decoder_out = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[:2]
             # hopd_outs.append(hopd_out)
             # interaction_decoder_outs.append(interaction_decoder_out)
 
@@ -205,6 +215,14 @@ class CDNCompo(nn.Module):
             # [num_decoder_layers(3),B,num_queries(100),num_verb_classes(29)]
             out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
                    'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
+            uctt_verb = None
+            if self.uncertainty:
+                uctt_verb = []
+                for i in range(outputs_verb_class.shape[0]):
+                    uctt_i = self.uctt(outputs_verb_class[i])
+                    uctt_verb.append(uctt_i)
+                uctt_verb = torch.stack(uctt_verb)
+                out['uctt_verb'] = uctt_verb[-1]
             if self.use_matching:
                 out['pred_matching_logits'] = outputs_matching[-1]
             if self.aux_loss:
@@ -307,8 +325,8 @@ class CDNCompo(nn.Module):
                 hopd_out_compo.append(hopd_out_compo_1)
                 interaction_decoder_out_compo_1 = torch.stack(interaction_decoder_out_compo_list, dim=1)
                 interaction_decoder_out_compo.append(interaction_decoder_out_compo_1)
-            hopd_out_compo = torch.stack(hopd_out_compo, dim=1)
-            interaction_decoder_out_compo = torch.stack(interaction_decoder_out_compo, dim=1)
+            hopd_out_compo = torch.stack(hopd_out_compo, dim=1)[:,:,0:100,:]
+            interaction_decoder_out_compo = torch.stack(interaction_decoder_out_compo, dim=1)[:,:,0:100,:]
         else:
             hopd_out_compo = hopd_out
             interaction_decoder_out_compo = torch.stack((interaction_decoder_out[:,1,:,:],interaction_decoder_out[:,0,:,:]),dim=1)
@@ -323,6 +341,20 @@ class CDNCompo(nn.Module):
         # [num_decoder_layers(3),B,num_queries(100),num_verb_classes(29)]
         out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
+        uctt_verb = None
+        if self.uncertainty:
+            uctt_verb = []
+            outputs_verb_class_uctt = outputs_verb_class
+            padding_width = self.num_queries - outputs_verb_class.shape[2]
+            if padding_width > 0:
+                padding = torch.zeros(outputs_verb_class.shape[0], outputs_verb_class.shape[1],
+                                      padding_width, outputs_verb_class.shape[3], device=outputs_verb_class.device)
+                outputs_verb_class_uctt = torch.cat((outputs_verb_class, padding), dim=2)
+            for i in range(outputs_verb_class.shape[0]):
+                uctt_i = self.uctt(outputs_verb_class_uctt[i])
+                uctt_verb.append(uctt_i)
+            uctt_verb = torch.stack(uctt_verb)
+            out['uctt_verb'] = uctt_verb[-1,:,0:outputs_verb_class.shape[2],:]
         if self.use_matching:
             out['pred_matching_logits'] = outputs_matching[-1]
         if self.aux_loss:
@@ -356,31 +388,56 @@ class CDNCompo(nn.Module):
         # [C(3),B,num_queries(100),num_verb_classes(29)]
         out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
+        uctt_verb = None
+        if self.uncertainty:
+            uctt_verb = []
+            for i in range(outputs_verb_class.shape[0]):
+                uctt_i = self.uctt(outputs_verb_class[i])
+                uctt_verb.append(uctt_i)
+            uctt_verb = torch.stack(uctt_verb)
+            out['uctt_verb'] = uctt_verb[-1]
         if self.use_matching:
             out['pred_matching_logits'] = outputs_matching[-1]
-
         if self.aux_loss:
             if self.use_matching:
                 out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
                                                         outputs_sub_coord, outputs_obj_coord,
-                                                        outputs_matching)
+                                                        outputs_matching, outputs_verb_uctt=uctt_verb)
             else:
                 out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
-                                                        outputs_sub_coord, outputs_obj_coord)
+                                                        outputs_sub_coord, outputs_obj_coord,
+                                                        outputs_verb_uctt=uctt_verb)
 
         return out
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_obj_class, outputs_verb_class, outputs_sub_coord, outputs_obj_coord, outputs_matching=None):
+    def _set_aux_loss(self, outputs_obj_class, outputs_verb_class, outputs_sub_coord, outputs_obj_coord, outputs_matching=None, outputs_verb_uctt=None):
         min_dec_layers_num = min(self.dec_layers_hopd, self.dec_layers_interaction)
         if self.use_matching:
-            return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c,
-                     'pred_obj_boxes': d, 'pred_matching_logits': e}
-                    for a, b, c, d, e in zip(outputs_obj_class[-min_dec_layers_num : -1], outputs_verb_class[-min_dec_layers_num : -1],
-                                             outputs_sub_coord[-min_dec_layers_num : -1], outputs_obj_coord[-min_dec_layers_num : -1],
-                                             outputs_matching[-min_dec_layers_num : -1])]
+            if outputs_verb_uctt is not None:
+                return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c,
+                         'pred_obj_boxes': d, 'pred_matching_logits': e, 'uctt_verb': f}
+                        for a, b, c, d, e, f in
+                        zip(outputs_obj_class[-min_dec_layers_num: -1], outputs_verb_class[-min_dec_layers_num: -1],
+                            outputs_sub_coord[-min_dec_layers_num: -1], outputs_obj_coord[-min_dec_layers_num: -1],
+                            outputs_matching[-min_dec_layers_num: -1], outputs_verb_uctt[-min_dec_layers_num: -1])]
+            else:
+                return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c,
+                         'pred_obj_boxes': d, 'pred_matching_logits': e}
+                        for a, b, c, d, e in
+                        zip(outputs_obj_class[-min_dec_layers_num: -1], outputs_verb_class[-min_dec_layers_num: -1],
+                            outputs_sub_coord[-min_dec_layers_num: -1], outputs_obj_coord[-min_dec_layers_num: -1],
+                            outputs_matching[-min_dec_layers_num: -1])]
         else:
-            return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c, 'pred_obj_boxes': d}
+            if outputs_verb_uctt is not None:
+                return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c, 'pred_obj_boxes': d,
+                         'uctt_verb': e}
+                        for a, b, c, d, e in
+                        zip(outputs_obj_class[-min_dec_layers_num: -1], outputs_verb_class[-min_dec_layers_num: -1],
+                            outputs_sub_coord[-min_dec_layers_num: -1], outputs_obj_coord[-min_dec_layers_num: -1],
+                            outputs_verb_uctt[-min_dec_layers_num: -1])]
+            else:
+                return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c, 'pred_obj_boxes': d}
                     for a, b, c, d in zip(outputs_obj_class[-min_dec_layers_num : -1], outputs_verb_class[-min_dec_layers_num : -1],
                                           outputs_sub_coord[-min_dec_layers_num : -1], outputs_obj_coord[-min_dec_layers_num : -1])]
 
@@ -395,6 +452,25 @@ class MLP(nn.Module):
     def forward(self, x):
         for i, layer in enumerate(self.layers):
             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+        return x
+
+class MLP_UCTT(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers, num_queries):
+        super().__init__()
+        self.num_layers = num_layers
+        h = [hidden_dim] * (num_layers - 1)
+        self.layers = nn.ModuleList()
+        for i, dims in enumerate(zip([input_dim] + h, h + [output_dim])):
+            self.layers.append(nn.Linear(dims[0], dims[1]))
+            self.layers.append(nn.BatchNorm1d(num_queries))
+            if i < num_layers-1:
+                self.layers.append(nn.ReLU())
+            else:
+                self.layers.append(nn.Tanh())
+
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = layer(x)
         return x
 
 
@@ -415,6 +491,7 @@ class SetCriterionHOI(nn.Module):
         self.register_buffer('empty_weight', empty_weight)
 
         self.alpha = args.alpha
+        self.uncertainty = args.uncertainty
 
         if args.dataset_file == 'hico':
             self.obj_nums_init = [1811, 9462, 2415, 7249, 1665, 3587, 1396, 1086, 10369, 800,
@@ -496,13 +573,17 @@ class SetCriterionHOI(nn.Module):
 
     def loss_obj_labels(self, outputs, targets, indices, num_interactions, log=True):
         assert 'pred_obj_logits' in outputs
-        src_logits = outputs['pred_obj_logits']
+        src_logits = outputs['pred_obj_logits']  #[B,num_queries,num_obj_classes]
 
         idx = self._get_src_permutation_idx(indices)
         target_classes_o = torch.cat([t['obj_labels'][J] for t, (_, J) in zip(targets, indices)])
         target_classes = torch.full(src_logits.shape[:2], self.num_obj_classes,
                                     dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
+        # indices: [(tensor([97]), tensor([0])), (tensor([43, 61]), tensor([0, 1]))]
+        # idx: (tensor([0, 1, 1]), tensor([97, 43, 61]))
+        # target_classes_o: tensor([36, 80, 80], device='cuda:0')
+        # target_classes: tensor[B,num_queries](81,81,81,...)
 
         if not self.obj_reweight:
             obj_weights = self.empty_weight
@@ -522,7 +603,7 @@ class SetCriterionHOI(nn.Module):
             aphal = min(math.pow(0.999, self.q_obj.qsize()),0.9)
             obj_weights = aphal * self.obj_weights_init + (1 - aphal) * obj_weights
 
-        loss_obj_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, obj_weights)
+        loss_obj_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, obj_weights)  #transpose:[B,num_obj_classes,num_queries]
         losses = {'loss_obj_ce': loss_obj_ce}
 
         if log:
@@ -531,22 +612,27 @@ class SetCriterionHOI(nn.Module):
 
     @torch.no_grad()
     def loss_obj_cardinality(self, outputs, targets, indices, num_interactions):
-        pred_logits = outputs['pred_obj_logits']
+        pred_logits = outputs['pred_obj_logits']  #[B,num_queries,num_obj_classes+1]
         device = pred_logits.device
         tgt_lengths = torch.as_tensor([len(v['obj_labels']) for v in targets], device=device)
-        card_pred = (pred_logits.argmax(-1) != pred_logits.shape[-1] - 1).sum(1)
+        card_pred = (pred_logits.argmax(-1) != pred_logits.shape[-1] - 1).sum(1)  #[B]
         card_err = F.l1_loss(card_pred.float(), tgt_lengths.float())
         losses = {'obj_cardinality_error': card_err}
         return losses
 
     def loss_verb_labels(self, outputs, targets, indices, num_interactions):
         assert 'pred_verb_logits' in outputs
-        src_logits = outputs['pred_verb_logits']
+        src_logits = outputs['pred_verb_logits']  # [B,num_queries,num_verb_classes]
+        uncertainty = None
+        if 'uctt_verb' in outputs:
+            uncertainty = outputs['uctt_verb']
 
         idx = self._get_src_permutation_idx(indices)
         target_classes_o = torch.cat([t['verb_labels'][J] for t, (_, J) in zip(targets, indices)])
         target_classes = torch.zeros_like(src_logits)
         target_classes[idx] = target_classes_o
+        # target_classes_o: [num_hois_in_batch,num_verb_classes]
+        # target_classes: [B,num_queries,num_verb_classes]
 
         if not self.verb_reweight:
             verb_weights = None
@@ -572,7 +658,7 @@ class SetCriterionHOI(nn.Module):
             verb_weights = aphal * self.verb_weights_init + (1 - aphal) * verb_weights
 
         src_logits = src_logits.sigmoid()
-        loss_verb_ce = self._neg_loss(src_logits, target_classes, weights=verb_weights, alpha=self.alpha)
+        loss_verb_ce = self._neg_loss(src_logits, target_classes, uncertainty, weights=verb_weights, alpha=self.alpha)
 
         losses = {'loss_verb_ce': loss_verb_ce}
         return losses
@@ -623,9 +709,13 @@ class SetCriterionHOI(nn.Module):
             losses['matching_error'] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
         return losses
 
-    def _neg_loss(self, pred, gt, weights=None, alpha=0.25):
-        pos_inds = gt.eq(1).float()
-        neg_inds = gt.lt(1).float()
+    def loss_verb_uctt(self, outputs, targets, indices, num_interactions):
+        losses = {'loss_verb_uctt': torch.mean(outputs['uctt_verb'])}
+        return losses
+
+    def _neg_loss(self, pred, gt, uctt, weights=None, alpha=0.25):
+        pos_inds = gt.gt(0.5).float()
+        neg_inds = gt.lt(0.5).float()
 
         loss = 0
 
@@ -634,6 +724,9 @@ class SetCriterionHOI(nn.Module):
             pos_loss = pos_loss * weights[:-1]
 
         neg_loss = (1 - alpha) * torch.log(1 - pred) * torch.pow(pred, 2) * neg_inds
+        if uctt is not None:
+            pos_loss = pos_loss * torch.exp(-uctt)
+            neg_loss = neg_loss * torch.exp(-uctt)
 
         num_pos  = pos_inds.float().sum()
         pos_loss = pos_loss.sum()
@@ -661,7 +754,8 @@ class SetCriterionHOI(nn.Module):
             'obj_cardinality': self.loss_obj_cardinality,
             'verb_labels': self.loss_verb_labels,
             'sub_obj_boxes': self.loss_sub_obj_boxes,
-            'matching_labels': self.loss_matching_labels
+            'matching_labels': self.loss_matching_labels,
+            'verb_uctt': self.loss_verb_uctt
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num, **kwargs)
@@ -688,9 +782,10 @@ class SetCriterionHOI(nn.Module):
                     kwargs = {}
                     if loss == 'obj_labels':
                         kwargs = {'log': False}
-                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_interactions, **kwargs)
-                    l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
-                    losses.update(l_dict)
+                    if not loss == 'verb_uctt':
+                        l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_interactions, **kwargs)
+                        l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
+                        losses.update(l_dict)
 
         return losses
 
@@ -787,6 +882,8 @@ def build(args):
     weight_dict['loss_obj_bbox'] = args.bbox_loss_coef
     weight_dict['loss_sub_giou'] = args.giou_loss_coef
     weight_dict['loss_obj_giou'] = args.giou_loss_coef
+    if args.uncertainty:
+        weight_dict['loss_verb_uctt'] = 1
     if args.use_matching:
         weight_dict['loss_matching'] = args.matching_loss_coef
 
@@ -800,6 +897,8 @@ def build(args):
     losses = ['obj_labels', 'verb_labels', 'sub_obj_boxes', 'obj_cardinality']
     if args.use_matching:
         losses.append('matching_labels')
+    if args.uncertainty:
+        losses.append('verb_uctt')
 
     criterion = SetCriterionHOI(args.num_obj_classes, args.num_queries, args.num_verb_classes, matcher=matcher,
                                 weight_dict=weight_dict, eos_coef=args.eos_coef, losses=losses,

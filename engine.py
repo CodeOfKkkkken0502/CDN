@@ -16,7 +16,8 @@ from datasets.vcoco_eval import VCOCOEvaluator
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0,
-                    remove: bool = False, batch_weight_mode: int = 0):
+                    remove: bool = False, batch_weight_mode: int = 0,
+                    label_smoothing: bool = False):
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="\t")
@@ -49,8 +50,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 target_compo = copy.deepcopy(targets[0][i])
                 num_HO_1 = target_compo['verb_labels'].shape[0]
                 num_HO_2 = targets[0][1 - i]['verb_labels'].shape[0]
+                num_HO_compo = min(num_HO_1 * num_HO_2, 100)
                 target_compo['verb_labels'] = targets[0][1 - i]['verb_labels'].repeat(num_HO_1, 1)
-                target_compo['matching_labels'] = torch.ones(num_HO_1 * num_HO_2).to(device)
+                target_compo['matching_labels'] = torch.ones(num_HO_compo)
                 obj_labels_repeat = torch.LongTensor(0).to(device)
                 sub_boxes_repeat = torch.Tensor(0, 4).to(device)
                 obj_boxes_repeat = torch.Tensor(0, 4).to(device)
@@ -60,23 +62,30 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         (sub_boxes_repeat, target_compo['sub_boxes'][j, :].repeat(num_HO_2, 1)))
                     obj_boxes_repeat = torch.cat(
                         (obj_boxes_repeat, target_compo['obj_boxes'][j, :].repeat(num_HO_2, 1)))
-                target_compo['obj_labels'] = obj_labels_repeat
-                target_compo['sub_boxes'] = sub_boxes_repeat
-                target_compo['obj_boxes'] = obj_boxes_repeat
-                for k in range(num_HO_1 * num_HO_2):
+                target_compo['obj_labels'] = obj_labels_repeat[0:num_HO_compo]
+                target_compo['sub_boxes'] = sub_boxes_repeat[0:num_HO_compo, :]
+                target_compo['obj_boxes'] = obj_boxes_repeat[0:num_HO_compo, :]
+                for k in range(num_HO_compo):
                     obj_index = target_compo['obj_labels'][k]
                     verb_indices = np.argwhere(target_compo['verb_labels'][k, :].cpu().numpy() == 1).reshape(-1)
                     for p in range(verb_indices.shape[0]):
                         target_compo['verb_labels'][k, verb_indices[p]] = obj_vb_matrix[int(obj_index), verb_indices[p]]
                     if not target_compo['verb_labels'][k, :].type(torch.uint8).any():
-                        target_compo['matching_labels'][k] = 0
-                matching_indices = target_compo['matching_labels'] == 1
-
-                target_compo['obj_labels'] = target_compo['obj_labels'][matching_indices]
-                target_compo['verb_labels'] = target_compo['verb_labels'][matching_indices]
-                target_compo['sub_boxes'] = target_compo['sub_boxes'][matching_indices]
-                target_compo['obj_boxes'] = target_compo['obj_boxes'][matching_indices]
-                target_compo['matching_labels'] = target_compo['matching_labels'][matching_indices]
+                        if targets[0][0]['verb_labels'].shape[1] == 117:
+                            target_compo['verb_labels'][k, 57] = 1
+                        elif targets[0][0]['verb_labels'].shape[1] == 29:
+                            target_compo['matching_labels'][k] = 0
+                target_compo['verb_labels'] = target_compo['verb_labels'][0:num_HO_compo, :]
+                if targets[0][0]['verb_labels'].shape[1] == 29:
+                    matching_indices = target_compo['matching_labels'] == 1
+                    if target_compo['obj_labels'][matching_indices].shape[0] != 0:
+                        target_compo['obj_labels'] = target_compo['obj_labels'][matching_indices]
+                        target_compo['verb_labels'] = target_compo['verb_labels'][matching_indices]
+                        target_compo['sub_boxes'] = target_compo['sub_boxes'][matching_indices]
+                        target_compo['obj_boxes'] = target_compo['obj_boxes'][matching_indices]
+                        target_compo['matching_labels'] = target_compo['matching_labels'][matching_indices]
+                    if label_smoothing:
+                        target_compo['verb_labels'] = target_compo['verb_labels'].clamp(0.1,0.9)
                 targets_compo.append(target_compo)
             targets.append((targets_compo[0], targets_compo[1]))
             '''
@@ -116,12 +125,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             indices = criterion.matcher(output_without_aux, targets[0])
             output_compo = model.module.forward_compo(hopd_out, interaction_decoder_out, indices)
             outputs.append(output_compo)
-            batch_weight_list = [[1, 1],
-                                 [1.5, 0.5],
-                                 [1.8, 0.2],
-                                 [1.95, 0.05],
-                                 [2, 0],
-                                 [0, 2]]
+            batch_weight_list = [[0.5, 0.5],
+                                 [0.75, 0.25],
+                                 [0.9, 0.1],
+                                 [1, 0],
+                                 [0, 1]]
             batch_weight = batch_weight_list[batch_weight_mode]
             losses_avg = 0
             for i in range(len(outputs)):
@@ -140,13 +148,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
 
                 loss_value = losses_reduced_scaled.item()
+                # print(loss_dict['loss_verb_ce'],loss_dict_reduced['loss_verb_ce'],loss_dict_reduced_scaled['loss_verb_ce'])
 
                 if not math.isfinite(loss_value):
                     print("Loss is {}, stopping training".format(loss_value))
                     print(loss_dict_reduced)
                     sys.exit(1)
 
-            losses_avg = losses_avg / len(outputs)
             optimizer.zero_grad()
             losses_avg.backward()
             if max_norm > 0:
