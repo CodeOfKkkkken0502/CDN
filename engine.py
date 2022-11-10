@@ -50,6 +50,50 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 target_compo = copy.deepcopy(targets[0][i])
                 num_HO_1 = target_compo['verb_labels'].shape[0]
                 num_HO_2 = targets[0][1 - i]['verb_labels'].shape[0]
+                num_HO_max = 100
+                obj_labels_compo = []
+                verb_labels_compo = []
+                sub_boxes_compo = []
+                obj_boxes_compo = []
+                if num_HO_2:
+                    for j in range(num_HO_1):
+                        obj_index = target_compo['obj_labels'][j]
+                        verb_labels = copy.deepcopy(targets[0][1 - i]['verb_labels'])
+                        verb_indices = np.argwhere(verb_labels.cpu().numpy() == 1)
+                        for p in range(verb_indices.shape[0]):
+                            verb_labels[verb_indices[p, 0], verb_indices[p, 1]] = obj_vb_matrix[
+                                int(obj_index), verb_indices[p, 1]]
+                        if not verb_labels.type(torch.uint8).any():
+                            verb_labels = verb_labels[0, :].unsqueeze(0)
+                            if verb_labels.shape[1] == 117:
+                                verb_labels[0, 57] = 1
+                        else:
+                            not_zero = torch.zeros(verb_labels.shape[0], dtype=bool)
+                            for k in range(verb_labels.shape[0]):
+                                if verb_labels[k, :].type(torch.uint8).any():
+                                    not_zero[k] = True
+                            verb_labels = verb_labels[not_zero, :]
+                        verb_labels_compo.append(verb_labels)
+                        obj_labels_compo.append(obj_index.repeat(verb_labels.shape[0]))
+                        sub_boxes_compo.append(target_compo['sub_boxes'][j,:].repeat(verb_labels.shape[0], 1))
+                        obj_boxes_compo.append(target_compo['obj_boxes'][j,:].repeat(verb_labels.shape[0], 1))
+                    if num_HO_1:
+                        target_compo['obj_labels'] = torch.cat(obj_labels_compo)[0:num_HO_max]
+                        target_compo['verb_labels'] = torch.cat(verb_labels_compo, 0)[0:num_HO_max]
+                        target_compo['sub_boxes'] = torch.cat(sub_boxes_compo, 0)[0:num_HO_max]
+                        target_compo['obj_boxes'] = torch.cat(obj_boxes_compo, 0)[0:num_HO_max]
+                        target_compo['matching_labels'] = torch.ones(target_compo['verb_labels'].shape[0])
+                else:
+                    target_compo['verb_labels'] = torch.zeros_like(target_compo['verb_labels'])
+                if label_smoothing:
+                    target_compo['verb_labels'] = target_compo['verb_labels'].clamp(0.1, 0.9)
+                targets_compo.append(target_compo)
+            targets.append((targets_compo[0], targets_compo[1]))
+            '''
+            for i in range(2):
+                target_compo = copy.deepcopy(targets[0][i])
+                num_HO_1 = target_compo['verb_labels'].shape[0]
+                num_HO_2 = targets[0][1 - i]['verb_labels'].shape[0]
                 num_HO_compo = min(num_HO_1 * num_HO_2, 100)
                 target_compo['verb_labels'] = targets[0][1 - i]['verb_labels'].repeat(num_HO_1, 1)
                 target_compo['matching_labels'] = torch.ones(num_HO_compo)
@@ -89,41 +133,19 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 targets_compo.append(target_compo)
             targets.append((targets_compo[0], targets_compo[1]))
             '''
-            for i in range(2):
-                target_compo = copy.deepcopy(targets[0][i])
-                num_HO_1 = target_compo['verb_labels'].shape[0]
-                num_HO_2 = targets[0][1 - i]['verb_labels'].shape[0]
-                verb_list = []
-                for j in range(num_HO_2):
-                    verb_indices = np.argwhere(targets[0][1 - i]['verb_labels'][j, :].cpu().numpy() == 1).reshape(-1)
-                    for verb_index in verb_indices:
-                        verb_list.append(verb_index)
-                for k in range(num_HO_1):
-                    obj_index = target_compo['obj_labels'][k]
-                    target_compo['verb_labels'][k, :] = 0
-                    for verb in verb_list:
-                        target_compo['verb_labels'][k, verb] = obj_vb_matrix[obj_index, verb]
-                    if not target_compo['verb_labels'][k, :].type(torch.uint8).any():
-                            target_compo['matching_labels'][k] = 0
-                matching_indices = target_compo['matching_labels'] == 1
-                if not target_compo['obj_labels'][matching_indices].shape[0] == 0:
-                    target_compo['obj_labels'] = target_compo['obj_labels'][matching_indices]
-                    target_compo['verb_labels'] = target_compo['verb_labels'][matching_indices]
-                    target_compo['sub_boxes'] = target_compo['sub_boxes'][matching_indices]
-                    target_compo['obj_boxes'] = target_compo['obj_boxes'][matching_indices]
-                    target_compo['matching_labels'] = target_compo['matching_labels'][matching_indices]
-                else:
-                    ccount+=1
-                targets_compo.append(target_compo)
-            targets.append((targets_compo[0], targets_compo[1]))
-            '''
 
             outputs = []
-            output, hopd_out, interaction_decoder_out = model(samples)
+            human_out = None
+            obj_out = None
+            hopd_out = None
+            if model.module.separate:
+                output, human_out, obj_out, interaction_decoder_out = model(samples)
+            else:
+                output, hopd_out, interaction_decoder_out = model(samples)
             outputs.append(output)
             output_without_aux = {k: v for k, v in output.items() if k != 'aux_outputs'}
             indices = criterion.matcher(output_without_aux, targets[0])
-            output_compo = model.module.forward_compo(hopd_out, interaction_decoder_out, indices)
+            output_compo = model.module.forward_compo(human_out, obj_out, hopd_out, interaction_decoder_out, indices)
             outputs.append(output_compo)
             batch_weight_list = [[0.5, 0.5],
                                  [0.75, 0.25],

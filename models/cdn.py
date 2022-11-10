@@ -85,6 +85,113 @@ class CDN(nn.Module):
         else:
             return hopd_out, interaction_decoder_out, memory.permute(1, 2, 0).view(bs, c, h, w)
 
+class MLP(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
+        super().__init__()
+        self.num_layers = num_layers
+        h = [hidden_dim] * (num_layers - 1)
+        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+        return x
+class CDNCompo(nn.Module):
+
+    def __init__(self, d_model=512, nhead=8, num_encoder_layers=6,
+                 num_dec_layers_hopd=3, num_dec_layers_interaction=3,
+                 dim_feedforward=2048, dropout=0.1,
+                 activation="relu", normalize_before=False,
+                 return_intermediate_dec=False, decouple=False, recouple=False):
+        super().__init__()
+
+        encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
+        encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+        self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
+        '''
+        decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
+        decoder_norm = nn.LayerNorm(d_model)
+        self.decoder = TransformerDecoder(decoder_layer, num_dec_layers_hopd, decoder_norm,
+                                          return_intermediate=return_intermediate_dec)
+        self.human_rep = MLP(d_model, d_model, d_model, 1)
+        self.obj_rep = MLP(d_model, d_model, d_model, 1)
+        '''
+        human_decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
+        human_decoder_norm = nn.LayerNorm(d_model)
+        self.human_decoder = TransformerDecoder(human_decoder_layer, num_dec_layers_hopd, human_decoder_norm,
+                                          return_intermediate=return_intermediate_dec)
+
+        object_decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+                                                      dropout, activation, normalize_before)
+        object_decoder_norm = nn.LayerNorm(d_model)
+        self.object_decoder = TransformerDecoder(object_decoder_layer, num_dec_layers_hopd, object_decoder_norm,
+                                                return_intermediate=return_intermediate_dec)
+
+        interaction_decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
+        interaction_decoder_norm = nn.LayerNorm(d_model)
+        self.interaction_decoder = TransformerDecoder(interaction_decoder_layer, num_dec_layers_interaction, interaction_decoder_norm,
+                                            return_intermediate=return_intermediate_dec)
+
+        self._reset_parameters()
+
+        self.d_model = d_model
+        self.nhead = nhead
+
+        self.decouple = decouple
+        self.recouple = recouple
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def forward(self, src, mask, query_embed, pos_embed):
+        bs, c, h, w = src.shape
+        src = src.flatten(2).permute(2, 0, 1)
+        pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
+        query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
+        mask = mask.flatten(1)
+
+        tgt = torch.zeros_like(query_embed)
+        memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
+        # hopd_out = self.decoder(tgt, memory, memory_key_padding_mask=mask,
+        #                         pos=pos_embed, query_pos=query_embed)
+        # hopd_out = hopd_out.transpose(1, 2)
+        # human_out = self.human_rep(hopd_out)
+        # obj_out = self.obj_rep(hopd_out)
+        human_out = self.human_decoder(tgt, memory, memory_key_padding_mask=mask, pos=pos_embed, query_pos=query_embed)
+        obj_out = self.object_decoder(tgt, memory, memory_key_padding_mask=mask, pos=pos_embed, query_pos=query_embed)
+        human_out = human_out.transpose(1, 2)
+        obj_out = obj_out.transpose(1, 2)
+
+        if self.decouple:
+            interaction_query_embed = query_embed
+        else:
+            interaction_query_embed = human_out[-1]+obj_out[-1]
+            interaction_query_embed = interaction_query_embed.permute(1, 0, 2)
+            if self.recouple:
+                if bs == 1:
+                    interaction_query_embed_compo = interaction_query_embed
+                else:
+                    interaction_query_embed_compo = torch.stack((interaction_query_embed[:,1,:],interaction_query_embed[:,0,:]),dim=1)
+
+        interaction_tgt = torch.zeros_like(interaction_query_embed)
+        interaction_decoder_out = self.interaction_decoder(interaction_tgt, memory, memory_key_padding_mask=mask,
+                                  pos=pos_embed, query_pos=interaction_query_embed)
+        interaction_decoder_out = interaction_decoder_out.transpose(1, 2)
+
+        if self.recouple:
+            interaction_tgt = torch.zeros_like(interaction_query_embed)
+            interaction_decoder_out_compo = self.interaction_decoder(interaction_tgt, memory, memory_key_padding_mask=mask,
+                                                                     pos=pos_embed, query_pos=interaction_query_embed_compo)
+            interaction_decoder_out_compo = interaction_decoder_out_compo.transpose(1, 2)
+            return human_out, obj_out, interaction_decoder_out, interaction_decoder_out_compo
+        else:
+            return human_out, obj_out, interaction_decoder_out
 
 class TransformerEncoder(nn.Module):
 
@@ -299,19 +406,34 @@ def _get_clones(module, N):
 
 
 def build_cdn(args):
-    return CDN(
-        d_model=args.hidden_dim,
-        dropout=args.dropout,
-        nhead=args.nheads,
-        dim_feedforward=args.dim_feedforward,
-        num_encoder_layers=args.enc_layers,
-        num_dec_layers_hopd=args.dec_layers_hopd,
-        num_dec_layers_interaction=args.dec_layers_interaction,
-        normalize_before=args.pre_norm,
-        return_intermediate_dec=True,
-        decouple=args.decouple,
-        recouple=args.recouple,
-    )
+    if args.separate:
+        return CDNCompo(
+            d_model=args.hidden_dim,
+            dropout=args.dropout,
+            nhead=args.nheads,
+            dim_feedforward=args.dim_feedforward,
+            num_encoder_layers=args.enc_layers,
+            num_dec_layers_hopd=args.dec_layers_hopd,
+            num_dec_layers_interaction=args.dec_layers_interaction,
+            normalize_before=args.pre_norm,
+            return_intermediate_dec=True,
+            decouple=args.decouple,
+            recouple=args.recouple,
+        )
+    else:
+        return CDN(
+            d_model=args.hidden_dim,
+            dropout=args.dropout,
+            nhead=args.nheads,
+            dim_feedforward=args.dim_feedforward,
+            num_encoder_layers=args.enc_layers,
+            num_dec_layers_hopd=args.dec_layers_hopd,
+            num_dec_layers_interaction=args.dec_layers_interaction,
+            normalize_before=args.pre_norm,
+            return_intermediate_dec=True,
+            decouple=args.decouple,
+            recouple=args.recouple,
+        )
 
 
 def _get_activation_fn(activation):

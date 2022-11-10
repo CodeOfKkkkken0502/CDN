@@ -156,6 +156,7 @@ def get_args_parser():
     parser.add_argument('--uncertainty', action='store_true', help='Use uncertainty quantification')
     parser.add_argument('--label_smoothing', action='store_true', help='Label smoothing for composite samples')
     parser.add_argument('--recouple', action='store_true', help='Use hopd_out_1 to initialize interaction query 2')
+    parser.add_argument('--separate', action='store_true', help='Separate decoders for human, object and interaction')
 
     return parser
 

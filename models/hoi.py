@@ -158,7 +158,7 @@ class CDNHOI2(nn.Module):
                     for a, b, c, d in zip(outputs_obj_class[-min_dec_layers_num : -1], outputs_verb_class[-min_dec_layers_num : -1],
                                           outputs_sub_coord[-min_dec_layers_num : -1], outputs_obj_coord[-min_dec_layers_num : -1])]
 
-class CDNCompo(nn.Module):
+class CDNHOICompo(nn.Module):
 
     def __init__(self, backbone, transformer, num_obj_classes, num_verb_classes, num_queries, aux_loss=False, fusion_mode=0, args=None):
         super().__init__()
@@ -181,6 +181,7 @@ class CDNCompo(nn.Module):
             self.matching_embed = nn.Linear(hidden_dim, 2)
         self.uncertainty = args.uncertainty
         self.recouple = args.recouple
+        self.separate = args.separate
         if self.uncertainty:
             self.uctt = MLP_UCTT(num_verb_classes, hidden_dim, num_verb_classes, 1, num_queries)
 
@@ -195,22 +196,38 @@ class CDNCompo(nn.Module):
             src, mask = features[-1].decompose()
             # src:[B,2048,15,20],mask:[B,15,20]
             assert mask is not None
-            if self.recouple:
-                hopd_out, interaction_decoder_out, interaction_decoder_out_compo = self.transformer(self.input_proj(src), mask,
-                                                                     self.query_embed.weight, pos[-1])
+            if self.separate:
+                if self.recouple:
+                    human_out, obj_out, interaction_decoder_out, interaction_decoder_out_compo= self.transformer(
+                        self.input_proj(src), mask, self.query_embed.weight, pos[-1])
+                else:
+                    human_out, obj_out, interaction_decoder_out = self.transformer(self.input_proj(src), mask,
+                                                                                   self.query_embed.weight, pos[-1])
             else:
-                hopd_out, interaction_decoder_out = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[:2]
+                if self.recouple:
+                    hopd_out, interaction_decoder_out, interaction_decoder_out_compo = self.transformer(self.input_proj(src), mask,
+                                                                         self.query_embed.weight, pos[-1])
+                else:
+                    hopd_out, interaction_decoder_out = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[:2]
             # hopd_outs.append(hopd_out)
             # interaction_decoder_outs.append(interaction_decoder_out)
 
-            # self.input_proj(src):[B,256,15,20]
-            # hopd_out, interaction_decoder_out:[num_decoder_layers(3),B,num_queries(100),hidden_dim(256)]
-            outputs_sub_coord = self.sub_bbox_embed(hopd_out).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
-            outputs_obj_coord = self.obj_bbox_embed(hopd_out).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
-            outputs_obj_class = self.obj_class_embed(hopd_out)  # [num_decoder_layers(3),B,num_queries(100),num_obj_classes+1(82)]
-            if self.use_matching:
-                outputs_matching = self.matching_embed(hopd_out)
-            obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
+            if self.separate:
+                outputs_sub_coord = self.sub_bbox_embed(human_out).sigmoid()
+                outputs_obj_coord = self.obj_bbox_embed(obj_out).sigmoid()
+                outputs_obj_class = self.obj_class_embed(obj_out)
+                if self.use_matching:
+                    outputs_matching = self.matching_embed(obj_out)
+                obj_verb_rep = torch.cat((obj_out, interaction_decoder_out), 3)
+            else:
+                # self.input_proj(src):[B,256,15,20]
+                # hopd_out, interaction_decoder_out:[num_decoder_layers(3),B,num_queries(100),hidden_dim(256)]
+                outputs_sub_coord = self.sub_bbox_embed(hopd_out).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
+                outputs_obj_coord = self.obj_bbox_embed(hopd_out).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
+                outputs_obj_class = self.obj_class_embed(hopd_out)  # [num_decoder_layers(3),B,num_queries(100),num_obj_classes+1(82)]
+                if self.use_matching:
+                    outputs_matching = self.matching_embed(hopd_out)
+                obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
             outputs_verb_class = self.verb_class_embed(obj_verb_rep)
             # [num_decoder_layers(3),B,num_queries(100),num_verb_classes(29)]
             out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
@@ -233,7 +250,10 @@ class CDNCompo(nn.Module):
                 else:
                     out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
                                                             outputs_sub_coord, outputs_obj_coord)
-            return out, hopd_out, interaction_decoder_out
+            if self.separate:
+                return out, human_out, obj_out, interaction_decoder_out
+            else:
+                return out, hopd_out, interaction_decoder_out
             #outs.append(out)
             '''
             for i in range(2):
@@ -306,37 +326,57 @@ class CDNCompo(nn.Module):
         else:
             return self.forward_eval(samples)
 
-    def forward_compo(self, hopd_out, interaction_decoder_out, indices):
+    def forward_compo(self, human_out, obj_out, hopd_out, interaction_decoder_out, indices):
         # indices: [(tensor([27, 37]), tensor([1, 0])), (tensor([95]), tensor([0]))] (num_hois * index_of_matched_query),(num_hois * index_of_gt)
-        hopd_out_compo = []
+        instance_out_compo = []
+        human_out_compo = []
         interaction_decoder_out_compo = []
         num_HO = (len(indices[0][0]), len(indices[1][0]))
+        if obj_out is None:
+            instance_out = hopd_out
+        else:
+            instance_out = obj_out
         if 0 not in num_HO:
             for i in range(2):
-                hopd_out_compo_list = []
+                if human_out is not None:
+                    human_out_compo_list = []
+                instance_out_compo_list = []
                 interaction_decoder_out_compo_list = []
                 for j in range(num_HO[i]):
-                    hopd_out_1 = hopd_out[:, i, indices[i][0][j], :]
+                    instance_out_1 = instance_out[:, i, indices[i][0][j], :]
                     for k in range(num_HO[1-i]):
                         interaction_decoder_out_2 = interaction_decoder_out[:, 1-i, indices[1-i][0][k], :]
-                        hopd_out_compo_list.append(hopd_out_1)
+                        instance_out_compo_list.append(instance_out_1)
+                        if human_out is not None:
+                            human_out_1 = human_out[:, i, indices[i][0][j], :]
+                            human_out_compo_list.append(human_out_1)
                         interaction_decoder_out_compo_list.append(interaction_decoder_out_2)
-                hopd_out_compo_1 = torch.stack(hopd_out_compo_list, dim=1)
-                hopd_out_compo.append(hopd_out_compo_1)
+                instance_out_compo_1 = torch.stack(instance_out_compo_list, dim=1)
+                instance_out_compo.append(instance_out_compo_1)
+                if human_out is not None:
+                    human_out_compo_1 = torch.stack(human_out_compo_list, dim=1)
+                    human_out_compo.append(human_out_compo_1)
                 interaction_decoder_out_compo_1 = torch.stack(interaction_decoder_out_compo_list, dim=1)
                 interaction_decoder_out_compo.append(interaction_decoder_out_compo_1)
-            hopd_out_compo = torch.stack(hopd_out_compo, dim=1)[:,:,0:100,:]
+            instance_out_compo = torch.stack(instance_out_compo, dim=1)[:,:,0:100,:]
             interaction_decoder_out_compo = torch.stack(interaction_decoder_out_compo, dim=1)[:,:,0:100,:]
+            if human_out is not None:
+                human_out_compo = torch.stack(human_out_compo, dim=1)[:,:,0:100,:]
         else:
-            hopd_out_compo = hopd_out
+            instance_out_compo = instance_out
+            if human_out is not None:
+                human_out_compo = human_out
             interaction_decoder_out_compo = torch.stack((interaction_decoder_out[:,1,:,:],interaction_decoder_out[:,0,:,:]),dim=1)
-        obj_verb_rep_compo = torch.cat((hopd_out_compo, interaction_decoder_out_compo), dim=3)
-        outputs_sub_coord = self.sub_bbox_embed(hopd_out_compo).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
-        outputs_obj_coord = self.obj_bbox_embed(hopd_out_compo).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
+        obj_verb_rep_compo = torch.cat((instance_out_compo, interaction_decoder_out_compo), dim=3)
+        if human_out is None:
+            outputs_sub_coord = self.sub_bbox_embed(instance_out_compo).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
+        else:
+            outputs_sub_coord = self.sub_bbox_embed(human_out_compo).sigmoid()
+        outputs_obj_coord = self.obj_bbox_embed(instance_out_compo).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
         outputs_obj_class = self.obj_class_embed(
-            hopd_out_compo)  # [num_decoder_layers(3),B,num_queries(100),num_obj_classes+1(82)]
+            instance_out_compo)  # [num_decoder_layers(3),B,num_queries(100),num_obj_classes+1(82)]
         if self.use_matching:
-            outputs_matching = self.matching_embed(hopd_out_compo)
+            outputs_matching = self.matching_embed(instance_out_compo)
         outputs_verb_class = self.verb_class_embed(obj_verb_rep_compo)
         # [num_decoder_layers(3),B,num_queries(100),num_verb_classes(29)]
         out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
@@ -374,16 +414,25 @@ class CDNCompo(nn.Module):
         # pos:[B,hidden_dim(256),15,20]
         src, mask = features[-1].decompose()  # src:[B,2048,15,20],mask:[B,15,20]
         assert mask is not None
-        hopd_out, interaction_decoder_out = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[:2]
-        # self.input_proj(src):[B,256,15,20]
-        # hopd_out, interaction_decoder_out:[C(3),B,num_queries(100),hidden_dim(256)]
-        outputs_sub_coord = self.sub_bbox_embed(hopd_out).sigmoid()  # [C(3),B,num_queries(100),4]
-        obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
-        outputs_obj_coord = self.obj_bbox_embed(hopd_out).sigmoid()
-        outputs_obj_class = self.obj_class_embed(hopd_out)
-        if self.use_matching:
-            outputs_matching = self.matching_embed(hopd_out)
-
+        if self.separate:
+            human_out, obj_out, interaction_decoder_out = self.transformer(self.input_proj(src), mask,
+                                                                               self.query_embed.weight, pos[-1])
+            outputs_sub_coord = self.sub_bbox_embed(human_out).sigmoid()
+            outputs_obj_coord = self.obj_bbox_embed(obj_out).sigmoid()
+            outputs_obj_class = self.obj_class_embed(obj_out)
+            if self.use_matching:
+                outputs_matching = self.matching_embed(obj_out)
+            obj_verb_rep = torch.cat((obj_out, interaction_decoder_out), 3)
+        else:
+            hopd_out, interaction_decoder_out = self.transformer(self.input_proj(src), mask,
+                                                                     self.query_embed.weight, pos[-1])[:2]
+            outputs_sub_coord = self.sub_bbox_embed(hopd_out).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
+            outputs_obj_coord = self.obj_bbox_embed(hopd_out).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
+            outputs_obj_class = self.obj_class_embed(
+                hopd_out)  # [num_decoder_layers(3),B,num_queries(100),num_obj_classes+1(82)]
+            if self.use_matching:
+                outputs_matching = self.matching_embed(hopd_out)
+            obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
         outputs_verb_class = self.verb_class_embed(obj_verb_rep)
         # [C(3),B,num_queries(100),num_verb_classes(29)]
         out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
@@ -853,7 +902,7 @@ def build(args):
     cdn = build_cdn(args)
 
     if args.compo:
-        model = CDNCompo(
+        model = CDNHOICompo(
             backbone,
             cdn,
             num_obj_classes=args.num_obj_classes,
