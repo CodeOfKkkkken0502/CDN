@@ -255,74 +255,6 @@ class CDNHOICompo(nn.Module):
             else:
                 return out, hopd_out, interaction_decoder_out
             #outs.append(out)
-            '''
-            for i in range(2):
-                outputs_sub_coord = self.sub_bbox_embed(hopd_outs[i]).sigmoid()  # [C(3),B,num_queries(100),4]
-                outputs_obj_coord = self.obj_bbox_embed(hopd_outs[i]).sigmoid()  # [C(3),B,num_queries(100),4]
-                outputs_obj_class = self.obj_class_embed(hopd_outs[i])  # [C(3),B,num_queries(100),num_obj_classes+1(82)]
-                if self.use_matching:
-                    outputs_matching = self.matching_embed(hopd_outs[i])
-                if self.fusion_mode:
-                    #obj_verb_rep_compo = (hopd_outs[i] + interaction_decoder_outs[1-i])/2
-
-                    rep_temp = torch.stack((hopd_outs[i], interaction_decoder_outs[1-i]))
-                    obj_verb_rep_compo = rep_temp.max(0).values
-                    # obj_rep = hopd_outs[i].permute(1, 0, 2, 3)
-                    # obj_rep = self.obj_rep_conv(obj_rep).permute(1, 0, 2, 3)
-                    # verb_rep = interaction_decoder_outs[1-i].permute(1, 0, 2, 3)
-                    # verb_rep = self.verb_rep_conv(verb_rep).permute(1, 0, 2, 3)
-                    # obj_verb_rep_compo = torch.cat((obj_rep, verb_rep), 3)
-                else:
-                    obj_verb_rep_compo = torch.cat((hopd_outs[i], interaction_decoder_outs[1-i]), 3)
-                outputs_verb_class_compo = self.verb_class_embed(obj_verb_rep_compo)
-                out = {'pred_obj_logits': outs[i]['pred_obj_logits'], 'pred_verb_logits': outputs_verb_class_compo[-1],
-                       'pred_sub_boxes': outs[i]['pred_sub_boxes'], 'pred_obj_boxes': outs[i]['pred_obj_boxes']}
-                if self.use_matching:
-                    out['pred_matching_logits'] = outputs_matching[-1]
-                if self.aux_loss:
-                    if self.use_matching:
-                        out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class_compo,
-                                                                outputs_sub_coord, outputs_obj_coord,
-                                                                outputs_matching)
-                    else:
-                        out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class_compo,
-                                                                outputs_sub_coord, outputs_obj_coord)
-                outs.append(out)
-            '''
-            '''
-            if self.fusion_mode:
-                interaction_decoder_out_minus = interaction_decoder_out - hopd_out
-                interaction_decoder_out_compo = torch.stack(
-                    [interaction_decoder_out_minus[:, 1, :, :], interaction_decoder_out_minus[:, 0, :, :]], 1)
-                # obj_verb_rep_compo = (hopd_out + interaction_decoder_out_compo)/2
-
-                # rep_temp = torch.stack((hopd_outs[i], interaction_decoder_outs[1 - i]))
-                # obj_verb_rep_compo = rep_temp.max(0).values
-                # obj_rep = hopd_outs[i].permute(1, 0, 2, 3)
-                # obj_rep = self.obj_rep_conv(obj_rep).permute(1, 0, 2, 3)
-                # verb_rep = interaction_decoder_outs[1-i].permute(1, 0, 2, 3)
-                # verb_rep = self.verb_rep_conv(verb_rep).permute(1, 0, 2, 3)
-                # obj_verb_rep_compo = torch.cat((obj_rep, verb_rep), 3)
-            else:
-                interaction_decoder_out_compo = torch.stack(
-                    [interaction_decoder_out[:, 1, :, :], interaction_decoder_out[:, 0, :, :]], 1)
-            obj_verb_rep_compo = torch.cat((hopd_out, interaction_decoder_out_compo), 3)
-            outputs_verb_class_compo = self.verb_class_embed(obj_verb_rep_compo)
-            out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class_compo[-1],
-                   'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
-            if self.use_matching:
-                out['pred_matching_logits'] = outputs_matching[-1]
-            if self.aux_loss:
-                if self.use_matching:
-                    out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class_compo,
-                                                            outputs_sub_coord, outputs_obj_coord,
-                                                            outputs_matching)
-                else:
-                    out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class_compo,
-                                                            outputs_sub_coord, outputs_obj_coord)
-            outs.append(out)
-            return outs
-            '''
         else:
             return self.forward_eval(samples)
 
@@ -351,6 +283,22 @@ class CDNHOICompo(nn.Module):
                             human_out_1 = human_out[:, i, indices[i][0][j], :]
                             human_out_compo_list.append(human_out_1)
                         interaction_decoder_out_compo_list.append(interaction_decoder_out_2)
+                    instance_out_compo_list = instance_out_compo_list[0:100]
+                    if human_out is not None:
+                        human_out_compo_list = human_out_compo_list[0:100]
+                    interaction_decoder_out_compo_list = interaction_decoder_out_compo_list[0:100]
+                    for l in range(num_HO[i]):
+                        if l != j:
+                            interaction_decoder_out_1 = interaction_decoder_out[:, i, indices[i][0][l], :]
+                            instance_out_compo_list.append(instance_out_1)
+                            if human_out is not None:
+                                human_out_1 = human_out[:, i, indices[i][0][j], :]
+                                human_out_compo_list.append(human_out_1)
+                            interaction_decoder_out_compo_list.append(interaction_decoder_out_1)
+                    instance_out_compo_list = instance_out_compo_list[0:200]
+                    if human_out is not None:
+                        human_out_compo_list = human_out_compo_list[0:200]
+                    interaction_decoder_out_compo_list = interaction_decoder_out_compo_list[0:200]
                 instance_out_compo_1 = torch.stack(instance_out_compo_list, dim=1)
                 instance_out_compo.append(instance_out_compo_1)
                 if human_out is not None:
@@ -358,10 +306,24 @@ class CDNHOICompo(nn.Module):
                     human_out_compo.append(human_out_compo_1)
                 interaction_decoder_out_compo_1 = torch.stack(interaction_decoder_out_compo_list, dim=1)
                 interaction_decoder_out_compo.append(interaction_decoder_out_compo_1)
-            instance_out_compo = torch.stack(instance_out_compo, dim=1)[:,:,0:100,:]
-            interaction_decoder_out_compo = torch.stack(interaction_decoder_out_compo, dim=1)[:,:,0:100,:]
+            num_1 = instance_out_compo[0].shape[1]
+            num_2 = instance_out_compo[1].shape[1]
+            if num_1 != num_2:
+                padding = torch.zeros(instance_out_compo[0].shape[0],abs(num_1-num_2),instance_out_compo[0].shape[2]).cuda()
+                if num_1 < num_2:
+                    instance_out_compo[0] = torch.cat((instance_out_compo[0],padding),dim=1)
+                    interaction_decoder_out_compo[0] = torch.cat((interaction_decoder_out_compo[0], padding), dim=1)
+                    if human_out is not None:
+                        human_out_compo[0] = torch.cat((human_out_compo[0], padding), dim=1)
+                else:
+                    instance_out_compo[1] = torch.cat((instance_out_compo[1],padding),dim=1)
+                    interaction_decoder_out_compo[1] = torch.cat((interaction_decoder_out_compo[1], padding), dim=1)
+                    if human_out is not None:
+                        human_out_compo[1] = torch.cat((human_out_compo[1], padding), dim=1)
+            instance_out_compo = torch.stack(instance_out_compo, dim=1)
+            interaction_decoder_out_compo = torch.stack(interaction_decoder_out_compo, dim=1)
             if human_out is not None:
-                human_out_compo = torch.stack(human_out_compo, dim=1)[:,:,0:100,:]
+                human_out_compo = torch.stack(human_out_compo, dim=1)
         else:
             instance_out_compo = instance_out
             if human_out is not None:
@@ -913,7 +875,7 @@ def build(args):
             args=args
         )
     else:
-        model = CDNHOI(
+        model = CDNHOI2(
             backbone,
             cdn,
             num_obj_classes=args.num_obj_classes,

@@ -121,7 +121,7 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
-    parser.add_argument('--num_workers', default=1, type=int)
+    parser.add_argument('--num_workers', default=0, type=int)
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
@@ -219,8 +219,8 @@ def main(args):
             sampler_train_sub1 = torch.utils.data.RandomSampler(dataset_train_sub1)
             sampler_train_sub2 = torch.utils.data.RandomSampler(dataset_train_sub2)
             sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-        batch_sampler_train_sub1 = torch.utils.data.BatchSampler(sampler_train_sub1, batch_size=1, drop_last=True)
-        batch_sampler_train_sub2 = torch.utils.data.BatchSampler(sampler_train_sub2, batch_size=1, drop_last=True)
+        batch_sampler_train_sub1 = torch.utils.data.BatchSampler(sampler_train_sub1, batch_size=int(args.batch_size/2), drop_last=True)
+        batch_sampler_train_sub2 = torch.utils.data.BatchSampler(sampler_train_sub2, batch_size=int(args.batch_size/2), drop_last=True)
         data_loader_train_sub1 = DataLoader(dataset_train_sub1, batch_sampler=batch_sampler_train_sub1,
                                        collate_fn=utils.collate_fn, num_workers=args.num_workers)
         data_loader_train_sub2 = DataLoader(dataset_train_sub2, batch_sampler=batch_sampler_train_sub2,

@@ -55,7 +55,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 verb_labels_compo = []
                 sub_boxes_compo = []
                 obj_boxes_compo = []
-                if num_HO_2:
+                if num_HO_1 and num_HO_2:
                     for j in range(num_HO_1):
                         obj_index = target_compo['obj_labels'][j]
                         verb_labels = copy.deepcopy(targets[0][1 - i]['verb_labels'])
@@ -77,62 +77,69 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         obj_labels_compo.append(obj_index.repeat(verb_labels.shape[0]))
                         sub_boxes_compo.append(target_compo['sub_boxes'][j,:].repeat(verb_labels.shape[0], 1))
                         obj_boxes_compo.append(target_compo['obj_boxes'][j,:].repeat(verb_labels.shape[0], 1))
-                    if num_HO_1:
-                        target_compo['obj_labels'] = torch.cat(obj_labels_compo)[0:num_HO_max]
-                        target_compo['verb_labels'] = torch.cat(verb_labels_compo, 0)[0:num_HO_max]
-                        target_compo['sub_boxes'] = torch.cat(sub_boxes_compo, 0)[0:num_HO_max]
-                        target_compo['obj_boxes'] = torch.cat(obj_boxes_compo, 0)[0:num_HO_max]
-                        target_compo['matching_labels'] = torch.ones(target_compo['verb_labels'].shape[0])
+
+                        cross_obj_labels = torch.cat(obj_labels_compo)[0:num_HO_max]
+                        cross_verb_labels = torch.cat(verb_labels_compo, 0)[0:num_HO_max]
+                        cross_sub_boxes = torch.cat(sub_boxes_compo, 0)[0:num_HO_max]
+                        cross_obj_boxes = torch.cat(obj_boxes_compo, 0)[0:num_HO_max]
+                        cross_matching_labels = torch.ones(target_compo['verb_labels'].shape[0], device=cross_obj_labels.device)
                 else:
-                    target_compo['verb_labels'] = torch.zeros_like(target_compo['verb_labels'])
+                    cross_obj_labels = target_compo['obj_labels'][0:num_HO_max]
+                    cross_verb_labels = torch.zeros_like(target_compo['verb_labels'])[0:num_HO_max]
+                    cross_sub_boxes = target_compo['sub_boxes'][0:num_HO_max]
+                    cross_obj_boxes = target_compo['obj_boxes'][0:num_HO_max]
+                    cross_matching_labels = target_compo['matching_labels']
+
+                verb_labels_compo = []
+                obj_labels_compo = []
+                sub_boxes_compo = []
+                obj_boxes_compo = []
+                # self compo
+                if num_HO_1 > 1:
+                    for j in range(num_HO_1):
+                        obj_index = target_compo['obj_labels'][j]
+                        verb_labels = copy.deepcopy(target_compo['verb_labels'])
+                        mask = torch.ones(verb_labels.shape[0], dtype=bool)
+                        mask[j] = False
+                        verb_labels = verb_labels[mask, :]
+                        verb_indices = np.argwhere(verb_labels.cpu().numpy() == 1)
+                        for p in range(verb_indices.shape[0]):
+                            verb_labels[verb_indices[p, 0], verb_indices[p, 1]] = obj_vb_matrix[
+                                int(obj_index), verb_indices[p, 1]]
+                        if not verb_labels.type(torch.uint8).any():
+                            verb_labels = verb_labels[0, :].unsqueeze(0)
+                            if verb_labels.shape[1] == 117:
+                                verb_labels[0, 57] = 1
+                        else:
+                            not_zero = torch.zeros(verb_labels.shape[0], dtype=bool)
+                            for k in range(verb_labels.shape[0]):
+                                if verb_labels[k, :].type(torch.uint8).any():
+                                    not_zero[k] = True
+                            verb_labels = verb_labels[not_zero, :]
+                        verb_labels_compo.append(verb_labels)
+                        obj_labels_compo.append(obj_index.repeat(verb_labels.shape[0]))
+                        sub_boxes_compo.append(target_compo['sub_boxes'][j, :].repeat(verb_labels.shape[0], 1))
+                        obj_boxes_compo.append(target_compo['obj_boxes'][j, :].repeat(verb_labels.shape[0], 1))
+                    self_obj_labels = torch.cat(obj_labels_compo)[0:num_HO_max]
+                    self_verb_labels = torch.cat(verb_labels_compo, 0)[0:num_HO_max]
+                    self_sub_boxes = torch.cat(sub_boxes_compo, 0)[0:num_HO_max]
+                    self_obj_boxes = torch.cat(obj_boxes_compo, 0)[0:num_HO_max]
+                    self_matching_labels = torch.ones(target_compo['verb_labels'].shape[0], device=cross_matching_labels.device)
+                    target_compo['obj_labels'] = torch.cat((cross_obj_labels, self_obj_labels))
+                    target_compo['verb_labels'] = torch.cat((cross_verb_labels, self_verb_labels))
+                    target_compo['sub_boxes'] = torch.cat((cross_sub_boxes, self_sub_boxes))
+                    target_compo['obj_boxes'] = torch.cat((cross_obj_boxes, self_obj_boxes))
+                    target_compo['matching_labels'] = torch.cat((cross_matching_labels, self_matching_labels))
+                else:
+                    target_compo['obj_labels'] = cross_obj_labels
+                    target_compo['verb_labels'] = cross_verb_labels
+                    target_compo['sub_boxes'] = cross_sub_boxes
+                    target_compo['obj_boxes'] = cross_obj_boxes
+                    target_compo['matching_labels'] = cross_matching_labels
                 if label_smoothing:
                     target_compo['verb_labels'] = target_compo['verb_labels'].clamp(0.1, 0.9)
                 targets_compo.append(target_compo)
-            targets.append((targets_compo[0], targets_compo[1]))
-            '''
-            for i in range(2):
-                target_compo = copy.deepcopy(targets[0][i])
-                num_HO_1 = target_compo['verb_labels'].shape[0]
-                num_HO_2 = targets[0][1 - i]['verb_labels'].shape[0]
-                num_HO_compo = min(num_HO_1 * num_HO_2, 100)
-                target_compo['verb_labels'] = targets[0][1 - i]['verb_labels'].repeat(num_HO_1, 1)
-                target_compo['matching_labels'] = torch.ones(num_HO_compo)
-                obj_labels_repeat = torch.LongTensor(0).to(device)
-                sub_boxes_repeat = torch.Tensor(0, 4).to(device)
-                obj_boxes_repeat = torch.Tensor(0, 4).to(device)
-                for j in range(num_HO_1):
-                    obj_labels_repeat = torch.cat((obj_labels_repeat, target_compo['obj_labels'][j].repeat(num_HO_2)))
-                    sub_boxes_repeat = torch.cat(
-                        (sub_boxes_repeat, target_compo['sub_boxes'][j, :].repeat(num_HO_2, 1)))
-                    obj_boxes_repeat = torch.cat(
-                        (obj_boxes_repeat, target_compo['obj_boxes'][j, :].repeat(num_HO_2, 1)))
-                target_compo['obj_labels'] = obj_labels_repeat[0:num_HO_compo]
-                target_compo['sub_boxes'] = sub_boxes_repeat[0:num_HO_compo, :]
-                target_compo['obj_boxes'] = obj_boxes_repeat[0:num_HO_compo, :]
-                for k in range(num_HO_compo):
-                    obj_index = target_compo['obj_labels'][k]
-                    verb_indices = np.argwhere(target_compo['verb_labels'][k, :].cpu().numpy() == 1).reshape(-1)
-                    for p in range(verb_indices.shape[0]):
-                        target_compo['verb_labels'][k, verb_indices[p]] = obj_vb_matrix[int(obj_index), verb_indices[p]]
-                    if not target_compo['verb_labels'][k, :].type(torch.uint8).any():
-                        if targets[0][0]['verb_labels'].shape[1] == 117:
-                            target_compo['verb_labels'][k, 57] = 1
-                        elif targets[0][0]['verb_labels'].shape[1] == 29:
-                            target_compo['matching_labels'][k] = 0
-                target_compo['verb_labels'] = target_compo['verb_labels'][0:num_HO_compo, :]
-                if targets[0][0]['verb_labels'].shape[1] == 29:
-                    matching_indices = target_compo['matching_labels'] == 1
-                    if target_compo['obj_labels'][matching_indices].shape[0] != 0:
-                        target_compo['obj_labels'] = target_compo['obj_labels'][matching_indices]
-                        target_compo['verb_labels'] = target_compo['verb_labels'][matching_indices]
-                        target_compo['sub_boxes'] = target_compo['sub_boxes'][matching_indices]
-                        target_compo['obj_boxes'] = target_compo['obj_boxes'][matching_indices]
-                        target_compo['matching_labels'] = target_compo['matching_labels'][matching_indices]
-                    if label_smoothing:
-                        target_compo['verb_labels'] = target_compo['verb_labels'].clamp(0.1,0.9)
-                targets_compo.append(target_compo)
-            targets.append((targets_compo[0], targets_compo[1]))
-            '''
+            targets.append(tuple(targets_compo))
 
             outputs = []
             human_out = None
