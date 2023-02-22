@@ -32,33 +32,37 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         obj_vb_matrix_hico = np.load('data/hico_20160224_det/hico_obj_vb_matrix.npy')
         obj_vb_matrix_vcoco = np.load('data/v-coco/vcoco_obj_vb_matrix.npy')
         for data_sub1, data_sub2 in metric_logger.log_every(data_loader, print_freq, header):
+            half_bs = data_sub1[0].tensors.shape[0]
             samples = []
-            sample = utils.nested_tensor_from_tensor_list(
-                [data_sub1[0].tensors.squeeze(0).to(device), data_sub2[0].tensors.squeeze(0).to(device)])
+            sample_list = [data_sub1[0].tensors[i, :, :, :].to(device) for i in range(half_bs)] + \
+                           [data_sub2[0].tensors[i, :, :, :].to(device) for i in range(half_bs)]
+            sample = utils.nested_tensor_from_tensor_list(sample_list)
             samples.append(sample)
             targets = []
             target1 = [{k: v.to(device) for k, v in t.items() if k != 'filename'} for t in data_sub1[1]]
             target2 = [{k: v.to(device) for k, v in t.items() if k != 'filename'} for t in data_sub2[1]]
-            targets.append((target1[0], target2[0]))
+            targets.append(tuple(target1) + tuple(target2))
 
             if targets[0][0]['verb_labels'].shape[1] == 117:
                 obj_vb_matrix = obj_vb_matrix_hico
             elif targets[0][0]['verb_labels'].shape[1] == 29:
                 obj_vb_matrix = obj_vb_matrix_vcoco
             targets_compo = []
-            for i in range(2):
+            for i in range(half_bs * 2):
+                index = half_bs + i if i < half_bs else i - half_bs
                 target_compo = copy.deepcopy(targets[0][i])
                 num_HO_1 = target_compo['verb_labels'].shape[0]
-                num_HO_2 = targets[0][1 - i]['verb_labels'].shape[0]
+                num_HO_2 = targets[0][index]['verb_labels'].shape[0]
                 num_HO_max = 100
                 obj_labels_compo = []
                 verb_labels_compo = []
                 sub_boxes_compo = []
                 obj_boxes_compo = []
+                #cross compo
                 if num_HO_1 and num_HO_2:
                     for j in range(num_HO_1):
                         obj_index = target_compo['obj_labels'][j]
-                        verb_labels = copy.deepcopy(targets[0][1 - i]['verb_labels'])
+                        verb_labels = copy.deepcopy(targets[0][index]['verb_labels'])
                         verb_indices = np.argwhere(verb_labels.cpu().numpy() == 1)
                         for p in range(verb_indices.shape[0]):
                             verb_labels[verb_indices[p, 0], verb_indices[p, 1]] = obj_vb_matrix[
@@ -78,11 +82,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         sub_boxes_compo.append(target_compo['sub_boxes'][j,:].repeat(verb_labels.shape[0], 1))
                         obj_boxes_compo.append(target_compo['obj_boxes'][j,:].repeat(verb_labels.shape[0], 1))
 
-                        cross_obj_labels = torch.cat(obj_labels_compo)[0:num_HO_max]
-                        cross_verb_labels = torch.cat(verb_labels_compo, 0)[0:num_HO_max]
-                        cross_sub_boxes = torch.cat(sub_boxes_compo, 0)[0:num_HO_max]
-                        cross_obj_boxes = torch.cat(obj_boxes_compo, 0)[0:num_HO_max]
-                        cross_matching_labels = torch.ones(target_compo['verb_labels'].shape[0], device=cross_obj_labels.device)
+                    cross_obj_labels = torch.cat(obj_labels_compo)[0:num_HO_max]
+                    cross_verb_labels = torch.cat(verb_labels_compo, 0)[0:num_HO_max]
+                    cross_sub_boxes = torch.cat(sub_boxes_compo, 0)[0:num_HO_max]
+                    cross_obj_boxes = torch.cat(obj_boxes_compo, 0)[0:num_HO_max]
+                    cross_matching_labels = torch.ones(target_compo['verb_labels'].shape[0], device=cross_obj_labels.device)
                 else:
                     cross_obj_labels = target_compo['obj_labels'][0:num_HO_max]
                     cross_verb_labels = torch.zeros_like(target_compo['verb_labels'])[0:num_HO_max]
@@ -165,7 +169,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 loss_dict = criterion(outputs[i], targets[i])
                 weight_dict = criterion.weight_dict
                 losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+                if 'loss_verb_uctt' in loss_dict.keys():
+                    losses = losses * torch.exp(-loss_dict['loss_verb_uctt'])
+                
                 losses = losses * batch_weight[i]
+
                 losses_avg += losses
 
                 # reduce losses over all GPUs for logging purposes

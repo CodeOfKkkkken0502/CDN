@@ -1,3 +1,7 @@
+import copy
+import pdb
+from PIL import Image
+
 import numpy as np
 from collections import defaultdict
 import os, cv2, json
@@ -18,6 +22,14 @@ class VCOCOEvaluator():
                              'throw_obj', 'catch_obj', 'cut_instr', 'cut_obj', 'run', 'work_on_computer_instr',
                              'ski_instr', 'surf_instr', 'skateboard_instr', 'smile', 'drink_instr', 'kick_obj',
                              'point_instr', 'read_obj', 'snowboard_instr']
+        self.obj_classes = ['person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
+                            'fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow',
+                            'elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
+                            'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle',
+                            'wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange',
+                            'broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed',
+                            'dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven',
+                            'toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush']
         self.thesis_map_indices = [0, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 24, 25, 27, 28]
 
         self.preds = []
@@ -54,7 +66,11 @@ class VCOCOEvaluator():
             })
 
         self.gts = []
+        self.filenames = []
+        self.img_dir = './data/v-coco/images/val2014/'
+        self.output_dir = './vis/v-coco/'
         for img_gts in gts:
+            self.filenames.append(img_gts['filename'])
             img_gts = {k: v.to('cpu').numpy() for k, v in img_gts.items() if k != 'id' and k != 'img_id' and k != 'filename'}
             self.gts.append({
                 'annotations': [{'bbox': bbox, 'category_id': label} for bbox, label in zip(img_gts['boxes'], img_gts['labels'])],
@@ -62,6 +78,102 @@ class VCOCOEvaluator():
             })
             for hoi in self.gts[-1]['hoi_annotation']:
                 self.sum_gts[hoi['category_id']] += 1
+        # self.preds[i].keys() = dict_keys(['predictions', 'hoi_prediction'])
+        # len(self.preds[i]['predictions']) = 200
+        # self.preds[i]['predictions'][j] = {'bbox': array(4,), 'category_id': int])
+        # len(self.preds[i]['hoi_prediction']) = 100
+        # self.preds[i]['hoi_prediction'][j] = {'subject_id': int, 'object_id': int, 'category_id': int, 'score': int}
+
+        # self.gts[i].keys() = dict_keys(['annotations', 'hoi_annotation'])
+        # len(self.gts[i]['annotations']) = num_bboxes
+        # self.gts[i]['annotations'][j] = {'bbox': array(4,), 'category_id': int])
+        # len(self.gts[i]['hoi_annotation']) = num_hois
+        # self.gts[i]['hoi_annotation'][j] = {'subject_id': int, 'object_id': int, 'category_id': int}
+
+    def visualize_bbox(self, img, pred, color, thickness=1):
+        h, w, _ = img.shape
+        x0 = int(max(pred['bbox'][0], 0))
+        x0 = min(x0, w)
+        x1 = int(max(pred['bbox'][2], 0))
+        x1 = min(x1, w)
+        y0 = int(max(pred['bbox'][1], 0))
+        y0 = min(y0, h)
+        y1 = int(max(pred['bbox'][3], 0))
+        y1 = min(y1, h)
+        x_center = int((x0 + x1)/2)
+        y_center = int((y0 + y1)/2)
+        cv2.rectangle(img, (x0, y0), (x1, y1), color, thickness)
+        category = self.obj_classes[pred['category_id']]
+        img = self.visualize_class(img, (x0, y0), category, color)
+        return x_center, y_center, img
+
+    def visualize_class(self, img, pos, class_str, color, font_scale=0.5):
+        x0, y0 = int(pos[0]), int(pos[1])
+        # Compute text size.
+        txt = class_str
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        ((txt_w, txt_h), _) = cv2.getTextSize(txt, font, font_scale, 1)
+        # Place text background.
+        back_tl = x0, y0
+        back_br = x0 + txt_w, y0 + int(1.3 * txt_h)
+        cv2.rectangle(img, back_tl, back_br, color, -1)
+        # Show text.
+        txt_tl = x0, y0 + txt_h
+        cv2.putText(img, txt, txt_tl, font, font_scale, (255, 255, 255), lineType=cv2.LINE_AA)
+        return img
+
+    def visualize(self):
+        _RED = (255, 0, 0)
+        _BLUE = (0, 0, 255)
+        _GREEN = (0, 255, 0)
+        for img_preds, img_gts, img_filename in zip(self.preds, self.gts, self.filenames):
+            img_file = self.img_dir + img_filename
+            #img = Image.open(img_file).convert('RGB')
+            img = cv2.imread(img_file)
+            pred_bboxes = img_preds['predictions']
+            gt_bboxes = img_gts['annotations']
+            pred_hois = img_preds['hoi_prediction']
+            gt_hois = img_gts['hoi_annotation']
+            img_pred = copy.deepcopy(img)
+            img_gt = copy.deepcopy(img)
+            for i in range(len(gt_hois)):
+                pred_hoi = pred_hois[i]
+                pred_sub = pred_bboxes[pred_hoi['subject_id']]
+                x_sub, y_sub, img_pred = self.visualize_bbox(img_pred, pred_sub, _RED, thickness=2)
+                pred_category = self.verb_classes[pred_hoi['category_id']]
+                pred_score = pred_hoi['score']
+                pred_verb = pred_category + ' ' + str(pred_score)
+                pred_obj = pred_bboxes[pred_hoi['object_id']]
+                if not pred_obj['category_id'] == 80:
+                    x_obj, y_obj, img_pred = self.visualize_bbox(img_pred, pred_obj, _BLUE, thickness=2)
+                    cv2.line(img_pred, (x_sub, y_sub), (x_obj, y_obj), _GREEN, 2)
+                    x_verb = int((x_sub+x_obj)/2)
+                    y_verb = int((y_sub+y_obj)/2)
+                else:
+                    x_verb = x_sub
+                    y_verb = y_sub
+                img_pred = self.visualize_class(img_pred, (x_verb, y_verb), pred_verb, _GREEN)
+
+                gt_hoi = gt_hois[i]
+                gt_sub = gt_bboxes[gt_hoi['subject_id']]
+                x_sub, y_sub, img_gt = self.visualize_bbox(img_gt, gt_sub, _RED, thickness=2)
+                gt_category = self.verb_classes[gt_hoi['category_id']]
+                gt_obj = gt_bboxes[gt_hoi['object_id']]
+                if not gt_hoi['object_id'] == -1:
+                    x_obj, y_obj, img_gt = self.visualize_bbox(img_gt, gt_obj, _BLUE, thickness=2)
+                    cv2.line(img_gt, (x_sub, y_sub), (x_obj, y_obj), _GREEN, 2)
+                    x_verb = int((x_sub + x_obj) / 2)
+                    y_verb = int((y_sub + y_obj) / 2)
+                else:
+                    x_verb = x_sub
+                    y_verb = y_sub
+                img_gt = self.visualize_class(img_gt, (x_verb, y_verb), gt_category, _GREEN)
+
+            output_pred = self.output_dir + 'pred/pred_' + img_filename
+            output_gt = self.output_dir + 'gt/gt_' + img_filename
+            cv2.imwrite(output_pred, img_pred)
+            cv2.imwrite(output_gt, img_gt)
+
 
     def evaluate(self):
         for img_preds, img_gts in zip(self.preds, self.gts):

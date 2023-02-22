@@ -1,3 +1,4 @@
+import copy
 import sys
 
 import torch
@@ -263,72 +264,80 @@ class CDNHOICompo(nn.Module):
         instance_out_compo = []
         human_out_compo = []
         interaction_decoder_out_compo = []
-        num_HO = (len(indices[0][0]), len(indices[1][0]))
+        num_queries = []
+        half_bs = int(interaction_decoder_out.shape[1]/2)
         if obj_out is None:
             instance_out = hopd_out
         else:
             instance_out = obj_out
-        if 0 not in num_HO:
-            for i in range(2):
-                if human_out is not None:
-                    human_out_compo_list = []
-                instance_out_compo_list = []
-                interaction_decoder_out_compo_list = []
-                for j in range(num_HO[i]):
-                    instance_out_1 = instance_out[:, i, indices[i][0][j], :]
-                    for k in range(num_HO[1-i]):
-                        interaction_decoder_out_2 = interaction_decoder_out[:, 1-i, indices[1-i][0][k], :]
+        for i in range(half_bs * 2):
+            index = half_bs + i if i < half_bs else i - half_bs
+            num_HO = (len(indices[i][0]), len(indices[index][0]))
+            if human_out is not None:
+                human_out_compo_list = []
+            instance_out_compo_list = []
+            interaction_decoder_out_compo_list = []
+            #cross compo
+            for j in range(num_HO[0]):
+                instance_out_1 = instance_out[:, i, indices[i][0][j], :]
+                for k in range(num_HO[1]):
+                    interaction_decoder_out_2 = interaction_decoder_out[:, index, indices[index][0][k], :]
+                    instance_out_compo_list.append(instance_out_1)
+                    if human_out is not None:
+                        human_out_1 = human_out[:, i, indices[i][0][j], :]
+                        human_out_compo_list.append(human_out_1)
+                    interaction_decoder_out_compo_list.append(interaction_decoder_out_2)
+            instance_out_compo_list = instance_out_compo_list[0:100]
+            if human_out is not None:
+                human_out_compo_list = human_out_compo_list[0:100]
+            interaction_decoder_out_compo_list = interaction_decoder_out_compo_list[0:100]
+            #self compo
+            for j in range(num_HO[0]):
+                instance_out_1 = instance_out[:, i, indices[i][0][j], :]
+                for l in range(num_HO[0]):
+                    if l != j:
+                        interaction_decoder_out_1 = interaction_decoder_out[:, i, indices[i][0][l], :]
                         instance_out_compo_list.append(instance_out_1)
                         if human_out is not None:
                             human_out_1 = human_out[:, i, indices[i][0][j], :]
                             human_out_compo_list.append(human_out_1)
-                        interaction_decoder_out_compo_list.append(interaction_decoder_out_2)
-                    instance_out_compo_list = instance_out_compo_list[0:100]
-                    if human_out is not None:
-                        human_out_compo_list = human_out_compo_list[0:100]
-                    interaction_decoder_out_compo_list = interaction_decoder_out_compo_list[0:100]
-                    for l in range(num_HO[i]):
-                        if l != j:
-                            interaction_decoder_out_1 = interaction_decoder_out[:, i, indices[i][0][l], :]
-                            instance_out_compo_list.append(instance_out_1)
-                            if human_out is not None:
-                                human_out_1 = human_out[:, i, indices[i][0][j], :]
-                                human_out_compo_list.append(human_out_1)
-                            interaction_decoder_out_compo_list.append(interaction_decoder_out_1)
-                    instance_out_compo_list = instance_out_compo_list[0:200]
-                    if human_out is not None:
-                        human_out_compo_list = human_out_compo_list[0:200]
-                    interaction_decoder_out_compo_list = interaction_decoder_out_compo_list[0:200]
+                        interaction_decoder_out_compo_list.append(interaction_decoder_out_1)
+            instance_out_compo_list = instance_out_compo_list[0:200]
+            if human_out is not None:
+                human_out_compo_list = human_out_compo_list[0:200]
+            interaction_decoder_out_compo_list = interaction_decoder_out_compo_list[0:200]
+
+            if len(instance_out_compo_list):
                 instance_out_compo_1 = torch.stack(instance_out_compo_list, dim=1)
-                instance_out_compo.append(instance_out_compo_1)
+                interaction_decoder_out_compo_1 = torch.stack(interaction_decoder_out_compo_list, dim=1)
                 if human_out is not None:
                     human_out_compo_1 = torch.stack(human_out_compo_list, dim=1)
-                    human_out_compo.append(human_out_compo_1)
-                interaction_decoder_out_compo_1 = torch.stack(interaction_decoder_out_compo_list, dim=1)
-                interaction_decoder_out_compo.append(interaction_decoder_out_compo_1)
-            num_1 = instance_out_compo[0].shape[1]
-            num_2 = instance_out_compo[1].shape[1]
-            if num_1 != num_2:
-                padding = torch.zeros(instance_out_compo[0].shape[0],abs(num_1-num_2),instance_out_compo[0].shape[2]).cuda()
-                if num_1 < num_2:
-                    instance_out_compo[0] = torch.cat((instance_out_compo[0],padding),dim=1)
-                    interaction_decoder_out_compo[0] = torch.cat((interaction_decoder_out_compo[0], padding), dim=1)
-                    if human_out is not None:
-                        human_out_compo[0] = torch.cat((human_out_compo[0], padding), dim=1)
-                else:
-                    instance_out_compo[1] = torch.cat((instance_out_compo[1],padding),dim=1)
-                    interaction_decoder_out_compo[1] = torch.cat((interaction_decoder_out_compo[1], padding), dim=1)
-                    if human_out is not None:
-                        human_out_compo[1] = torch.cat((human_out_compo[1], padding), dim=1)
-            instance_out_compo = torch.stack(instance_out_compo, dim=1)
-            interaction_decoder_out_compo = torch.stack(interaction_decoder_out_compo, dim=1)
+                num_queries.append(interaction_decoder_out_compo_1.shape[1])
+            else:
+                instance_out_compo_1 = instance_out[:,i,:,:].clone()
+                if human_out is not None:
+                    human_out_compo_1 = human_out[:,i,:,:].clone()
+                interaction_decoder_out_compo_1 = interaction_decoder_out[:,index,:,:].clone()
+                num_queries.append(instance_out[:, i, :, :].shape[1])
             if human_out is not None:
-                human_out_compo = torch.stack(human_out_compo, dim=1)
-        else:
-            instance_out_compo = instance_out
-            if human_out is not None:
-                human_out_compo = human_out
-            interaction_decoder_out_compo = torch.stack((interaction_decoder_out[:,1,:,:],interaction_decoder_out[:,0,:,:]),dim=1)
+                human_out_compo.append(human_out_compo_1)
+            instance_out_compo.append(instance_out_compo_1)
+            interaction_decoder_out_compo.append(interaction_decoder_out_compo_1)
+
+        num_max = max(num_queries)
+        for i in range(half_bs * 2):
+            if num_queries[i] != num_max:
+                padding = torch.zeros(instance_out_compo[0].shape[0], num_max - num_queries[i],
+                                      instance_out_compo[0].shape[2]).to(instance_out_compo[i].device)
+                instance_out_compo[i] = torch.cat((instance_out_compo[i], padding), dim=1)
+                interaction_decoder_out_compo[i] = torch.cat((interaction_decoder_out_compo[i], padding), dim=1)
+                if human_out is not None:
+                    human_out_compo[i] = torch.cat((human_out_compo[i], padding), dim=1)
+        instance_out_compo = torch.stack(instance_out_compo, dim=1)
+        interaction_decoder_out_compo = torch.stack(interaction_decoder_out_compo, dim=1)
+        if human_out is not None:
+            human_out_compo = torch.stack(human_out_compo, dim=1)
+
         obj_verb_rep_compo = torch.cat((instance_out_compo, interaction_decoder_out_compo), dim=3)
         if human_out is None:
             outputs_sub_coord = self.sub_bbox_embed(instance_out_compo).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
@@ -346,17 +355,11 @@ class CDNHOICompo(nn.Module):
         uctt_verb = None
         if self.uncertainty:
             uctt_verb = []
-            outputs_verb_class_uctt = outputs_verb_class
-            padding_width = self.num_queries - outputs_verb_class.shape[2]
-            if padding_width > 0:
-                padding = torch.zeros(outputs_verb_class.shape[0], outputs_verb_class.shape[1],
-                                      padding_width, outputs_verb_class.shape[3], device=outputs_verb_class.device)
-                outputs_verb_class_uctt = torch.cat((outputs_verb_class, padding), dim=2)
             for i in range(outputs_verb_class.shape[0]):
-                uctt_i = self.uctt(outputs_verb_class_uctt[i])
+                uctt_i = self.uctt(outputs_verb_class[i])
                 uctt_verb.append(uctt_i)
             uctt_verb = torch.stack(uctt_verb)
-            out['uctt_verb'] = uctt_verb[-1,:,0:outputs_verb_class.shape[2],:]
+            out['uctt_verb'] = uctt_verb[-1]
         if self.use_matching:
             out['pred_matching_logits'] = outputs_matching[-1]
         if self.aux_loss:
@@ -469,19 +472,26 @@ class MLP_UCTT(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers, num_queries):
         super().__init__()
         self.num_layers = num_layers
+        self.num_queries = 200
         h = [hidden_dim] * (num_layers - 1)
         self.layers = nn.ModuleList()
         for i, dims in enumerate(zip([input_dim] + h, h + [output_dim])):
             self.layers.append(nn.Linear(dims[0], dims[1]))
-            self.layers.append(nn.BatchNorm1d(num_queries))
+            self.layers.append(nn.BatchNorm1d(self.num_queries))
             if i < num_layers-1:
                 self.layers.append(nn.ReLU())
             else:
                 self.layers.append(nn.Tanh())
 
     def forward(self, x):
+        orig_num_queries = x.shape[1]
+        if orig_num_queries < self.num_queries:
+            padding = torch.zeros(x.shape[0],self.num_queries-orig_num_queries,x.shape[2]).to(x.device)
+            x = torch.cat((x,padding),dim=1)
         for i, layer in enumerate(self.layers):
+            #print(x.shape)
             x = layer(x)
+        x = x[:,:orig_num_queries,:]
         return x
 
 
@@ -721,7 +731,7 @@ class SetCriterionHOI(nn.Module):
         return losses
 
     def loss_verb_uctt(self, outputs, targets, indices, num_interactions):
-        losses = {'loss_verb_uctt': torch.mean(outputs['uctt_verb'])}
+        losses = {'loss_verb_uctt': 0.5*torch.mean(torch.max(outputs['uctt_verb'],dim=2)[0])}
         return losses
 
     def _neg_loss(self, pred, gt, uctt, weights=None, alpha=0.25):
@@ -875,7 +885,7 @@ def build(args):
             args=args
         )
     else:
-        model = CDNHOI2(
+        model = CDNHOI(
             backbone,
             cdn,
             num_obj_classes=args.num_obj_classes,
