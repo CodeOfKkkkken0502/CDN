@@ -158,23 +158,21 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             indices = criterion.matcher(output_without_aux, targets[0])
             output_compo = model.module.forward_compo(human_out, obj_out, hopd_out, interaction_decoder_out, indices)
             outputs.append(output_compo)
-            batch_weight_list = [[0.5, 0.5],
+            batch_weight_list = torch.Tensor([[0.5, 0.5],
                                  [0.75, 0.25],
                                  [0.9, 0.1],
                                  [1, 0],
-                                 [0, 1]]
+                                 [0, 1]])
             batch_weight = batch_weight_list[batch_weight_mode]
+            losses_list = []
             losses_avg = 0
             for i in range(len(outputs)):
                 loss_dict = criterion(outputs[i], targets[i])
                 weight_dict = criterion.weight_dict
                 losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+                losses_list.append(losses)
                 if 'loss_verb_uctt' in loss_dict.keys():
-                    losses = losses * torch.exp(-loss_dict['loss_verb_uctt'])
-                
-                losses = losses * batch_weight[i]
-
-                losses_avg += losses
+                    batch_weight[i] = torch.exp(-loss_dict['loss_verb_uctt'])
 
                 # reduce losses over all GPUs for logging purposes
                 loss_dict_reduced = utils.reduce_dict(loss_dict)
@@ -192,12 +190,20 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     print(loss_dict_reduced)
                     sys.exit(1)
 
+            #print(batch_weight)
+            batch_weight = batch_weight / batch_weight.sum()
+            #print(batch_weight)
+            #batch_weight_sum = sum(batch_weight)
+            for i in range(len(outputs)):
+                #batch_weight[i] = batch_weight[i] / batch_weight_sum
+                losses_avg += batch_weight[i] * losses_list[i]
             optimizer.zero_grad()
             losses_avg.backward()
             if max_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             optimizer.step()
 
+            metric_logger.update(batch_weight_orig=batch_weight[0].item(),batch_weight_compo=batch_weight[1].item())
             metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
             if hasattr(criterion, 'loss_labels'):
                 metric_logger.update(class_error=loss_dict_reduced['class_error'])

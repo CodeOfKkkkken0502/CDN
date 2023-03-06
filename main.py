@@ -293,6 +293,8 @@ def main(args):
 
         if args.dataset_file == 'hico':
             checkpoint_path = os.path.join(output_dir, 'checkpoint_last.pth')
+            if epoch == args.epochs - 1:
+                checkpoint_path = os.path.join(output_dir, 'checkpoint_last_'+str(args.epochs)+'.pth')
             utils.save_on_master({
                 'model': model_without_ddp.state_dict(),
                 'optimizer': optimizer.state_dict(),
