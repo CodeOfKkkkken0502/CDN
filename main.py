@@ -291,28 +291,16 @@ def main(args):
                 tb_writer.add_scalar(k, meter, epoch+(args.freeze_mode*90))
         lr_scheduler.step()
 
-        if args.dataset_file == 'hico':
-            checkpoint_path = os.path.join(output_dir, 'checkpoint_last.pth')
-            if epoch == args.epochs - 1:
-                checkpoint_path = os.path.join(output_dir, 'checkpoint_last_'+str(args.epochs)+'.pth')
-            utils.save_on_master({
-                'model': model_without_ddp.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'epoch': epoch,
-                'args': args,
-            }, checkpoint_path)
-        else:
-            if epoch == args.epochs - 1:
-                checkpoint_name = 'checkpoint_last_'+str(args.epochs)+'.pth'
-                checkpoint_path = os.path.join(output_dir, checkpoint_name)
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }, checkpoint_path)
+        checkpoint_path = os.path.join(output_dir, 'checkpoint_last.pth')
+        if epoch == args.epochs - 1:
+            checkpoint_path = os.path.join(output_dir, 'checkpoint_last_'+str(args.epochs)+'.pth')
+        utils.save_on_master({
+            'model': model_without_ddp.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'lr_scheduler': lr_scheduler.state_dict(),
+            'epoch': epoch,
+            'args': args,
+        }, checkpoint_path)
 
 
         if args.freeze_mode == 0 and epoch < args.lr_drop and epoch % 5 != 0:  ## eval every 5 epoch before lr_drop

@@ -171,8 +171,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 weight_dict = criterion.weight_dict
                 losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
                 losses_list.append(losses)
-                if 'loss_verb_uctt' in loss_dict.keys():
-                    batch_weight[i] = torch.exp(-loss_dict['loss_verb_uctt'])
+                if 'loss_uctt' in loss_dict.keys():
+                    batch_weight[i] = -loss_dict['loss_uctt']
 
                 # reduce losses over all GPUs for logging purposes
                 loss_dict_reduced = utils.reduce_dict(loss_dict)
@@ -191,7 +191,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     sys.exit(1)
 
             #print(batch_weight)
-            batch_weight = batch_weight / batch_weight.sum()
+            #batch_weight = batch_weight / batch_weight.sum()
+            batch_weight = torch.nn.functional.softmax(batch_weight,dim=0)
             #print(batch_weight)
             #batch_weight_sum = sum(batch_weight)
             for i in range(len(outputs)):
@@ -204,6 +205,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             optimizer.step()
 
             metric_logger.update(batch_weight_orig=batch_weight[0].item(),batch_weight_compo=batch_weight[1].item())
+            metric_logger.update(loss_orig=losses_list[0].item(), loss_compo=losses_list[1].item())
             metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
             if hasattr(criterion, 'loss_labels'):
                 metric_logger.update(class_error=loss_dict_reduced['class_error'])

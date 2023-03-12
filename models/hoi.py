@@ -753,7 +753,11 @@ class SetCriterionHOI(nn.Module):
         uctt_match_batch = torch.cat(uctt_match_list)
         if not len(uctt_match_batch):
             uctt_match_batch = torch.Tensor([0]).to(uctt_match_batch.device)
-        losses = {'loss_verb_uctt': 0.5*torch.log(torch.mean(torch.exp(uctt_match_batch)))}
+        src_logits = src_logits.sigmoid()*torch.exp(-uncertainty)*pos_inds
+        uctt_avg = torch.log(torch.mean(torch.exp(uctt_match_batch)))
+        loss_verb_uctt = torch.nn.functional.binary_cross_entropy_with_logits(src_logits,target_classes)
+        losses = {'loss_uctt': uctt_avg,
+                  'loss_verb_uctt': uctt_avg+loss_verb_uctt}
         return losses
 
     def _neg_loss(self, pred, gt, uctt, weights=None, alpha=0.25):
@@ -767,9 +771,11 @@ class SetCriterionHOI(nn.Module):
             pos_loss = pos_loss * weights[:-1]
 
         neg_loss = (1 - alpha) * torch.log(1 - pred) * torch.pow(pred, 2) * neg_inds  # [B,num_queries,num_verb_classes]
+        '''
         if uctt is not None:
             pos_loss = pos_loss * torch.exp(-uctt)
             neg_loss = neg_loss * torch.exp(-uctt)
+        '''
 
         num_pos  = pos_inds.float().sum()
         pos_loss = pos_loss.sum()
@@ -907,7 +913,7 @@ def build(args):
             args=args
         )
     else:
-        model = CDNHOI(
+        model = CDNHOI2(
             backbone,
             cdn,
             num_obj_classes=args.num_obj_classes,
