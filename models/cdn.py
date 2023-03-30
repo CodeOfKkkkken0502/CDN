@@ -55,35 +55,39 @@ class CDN(nn.Module):
 
         tgt = torch.zeros_like(query_embed)
         memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
-        hopd_out = self.decoder(tgt, memory, memory_key_padding_mask=mask,
-                          pos=pos_embed, query_pos=query_embed)
-        hopd_out = hopd_out.transpose(1, 2)
-
-        if self.decouple:
-            interaction_query_embed = query_embed
-        else:
-            interaction_query_embed = hopd_out[-1]
-            interaction_query_embed = interaction_query_embed.permute(1, 0, 2)
-            if self.recouple:
-                if bs == 1:
-                    interaction_query_embed_compo = interaction_query_embed
-                else:
-                    interaction_query_embed_compo = torch.stack((interaction_query_embed[:,1,:],interaction_query_embed[:,0,:]),dim=1)
-
-
-        interaction_tgt = torch.zeros_like(interaction_query_embed)
-        interaction_decoder_out = self.interaction_decoder(interaction_tgt, memory, memory_key_padding_mask=mask,
-                                  pos=pos_embed, query_pos=interaction_query_embed)
-        interaction_decoder_out = interaction_decoder_out.transpose(1, 2)
-
         if self.recouple:
-            interaction_tgt = torch.zeros_like(interaction_query_embed)
-            interaction_decoder_out_compo = self.interaction_decoder(interaction_tgt, memory, memory_key_padding_mask=mask,
-                                                                     pos=pos_embed, query_pos=interaction_query_embed_compo)
-            interaction_decoder_out_compo = interaction_decoder_out_compo.transpose(1, 2)
-            return hopd_out, interaction_decoder_out, interaction_decoder_out_compo
+            interaction_decoder_out = self.interaction_decoder(tgt, memory, memory_key_padding_mask=mask,
+                                                               pos=pos_embed, query_pos=query_embed)
+            interaction_decoder_out = interaction_decoder_out.transpose(1, 2)
+
+            if self.decouple:
+                hopd_query_embed = query_embed
+            else:
+                hopd_query_embed = interaction_decoder_out[-1]
+                hopd_query_embed = hopd_query_embed.permute(1, 0, 2)
+
+            hopd_tgt = torch.zeros_like(hopd_query_embed)
+            hopd_out = self.decoder(hopd_tgt, memory, memory_key_padding_mask=mask,
+                                    pos=pos_embed, query_pos=hopd_query_embed)
+            hopd_out = hopd_out.transpose(1, 2)
+
         else:
-            return hopd_out, interaction_decoder_out, memory.permute(1, 2, 0).view(bs, c, h, w)
+            hopd_out = self.decoder(tgt, memory, memory_key_padding_mask=mask,
+                              pos=pos_embed, query_pos=query_embed)
+            hopd_out = hopd_out.transpose(1, 2)
+
+            if self.decouple:
+                interaction_query_embed = query_embed
+            else:
+                interaction_query_embed = hopd_out[-1]
+                interaction_query_embed = interaction_query_embed.permute(1, 0, 2)
+
+            interaction_tgt = torch.zeros_like(interaction_query_embed)
+            interaction_decoder_out = self.interaction_decoder(interaction_tgt, memory, memory_key_padding_mask=mask,
+                                      pos=pos_embed, query_pos=interaction_query_embed)
+            interaction_decoder_out = interaction_decoder_out.transpose(1, 2)
+
+        return hopd_out, interaction_decoder_out, memory.permute(1, 2, 0).view(bs, c, h, w)
 
 class MLP(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):

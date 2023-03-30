@@ -155,7 +155,7 @@ def get_args_parser():
     parser.add_argument('--fusion_mode', default=0, type=int, help='Way to fuse HO-pair and interaction representations')
     parser.add_argument('--uncertainty', action='store_true', help='Use uncertainty quantification')
     parser.add_argument('--label_smoothing', action='store_true', help='Label smoothing for composite samples')
-    parser.add_argument('--recouple', action='store_true', help='Use hopd_out_1 to initialize interaction query 2')
+    parser.add_argument('--recouple', action='store_true', help='Use interaction_decoder_out to initialize hopd_out')
     parser.add_argument('--separate', action='store_true', help='Separate decoders for human, object and interaction')
     parser.add_argument('--zero_shot_type', default='default', help='Zero-shot type')
 
@@ -177,6 +177,7 @@ def main(args):
 
     seed = args.seed + utils.get_rank()
     torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 

@@ -206,7 +206,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
             metric_logger.update(batch_weight_orig=batch_weight[0].item(),batch_weight_compo=batch_weight[1].item())
             metric_logger.update(loss_orig=losses_list[0].item(), loss_compo=losses_list[1].item())
-            metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
+            metric_logger.update(loss=losses_avg, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
             if hasattr(criterion, 'loss_labels'):
                 metric_logger.update(class_error=loss_dict_reduced['class_error'])
             else:
