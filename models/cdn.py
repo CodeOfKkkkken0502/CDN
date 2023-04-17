@@ -55,6 +55,12 @@ class CDN(nn.Module):
 
         tgt = torch.zeros_like(query_embed)
         memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
+        # src.shape: torch.Size([h*w, bs, hidden_dim])
+        # tgt.shape: torch.Size([num_queries, bs, hidden_dim])
+        # memory.shape: torch.Size([h*w, bs, hidden_dim])
+        # mask.shape: torch.Size([bs, h*w])
+        # pos_embed.shape: torch.Size([h*w, bs, hidden_dim])
+        # query_embed.shape: torch.Size([num_queries, bs, hidden_dim])
         if self.recouple:
             interaction_decoder_out = self.interaction_decoder(tgt, memory, memory_key_padding_mask=mask,
                                                                pos=pos_embed, query_pos=query_embed)

@@ -16,7 +16,7 @@ import pdb
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .cdn import build_cdn
-from .cdn import TransformerDecoderLayer, TransformerDecoder
+from .cdn import TransformerEncoderLayer, TransformerEncoder, TransformerDecoderLayer, TransformerDecoder
 
 
 class CDNHOI(nn.Module):
@@ -113,7 +113,12 @@ class CDNHOI2(nn.Module):
             self.matching_embed = nn.Linear(hidden_dim, 2)
         self.fusion_mode = args.fusion_mode
         if self.fusion_mode:
-            self.fusion_module = MLP(hidden_dim*2, hidden_dim*2, hidden_dim*2, 3)
+            # self.fusion_module = MLP(hidden_dim*2, hidden_dim*2, hidden_dim*2, 1)
+            encoder_layer = TransformerEncoderLayer(d_model=hidden_dim * 2, nhead=args.nheads,
+                                                    dim_feedforward=args.dim_feedforward,
+                                                    dropout=args.dropout, normalize_before=args.pre_norm)
+            encoder_norm = nn.LayerNorm(hidden_dim) if args.pre_norm else None
+            self.fusion_module = TransformerEncoder(encoder_layer, 1, encoder_norm)
 
     def forward(self, samples: NestedTensor):
         if not isinstance(samples, NestedTensor):
@@ -132,7 +137,13 @@ class CDNHOI2(nn.Module):
         if self.use_matching:
             outputs_matching = self.matching_embed(hopd_out)
         if self.fusion_mode:
-            obj_verb_rep = self.fusion_module(obj_verb_rep)
+            # obj_verb_rep = self.fusion_module(obj_verb_rep)
+            obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
+            obj_verb_rep_fu = []
+            for m in range(obj_verb_rep.shape[0]):
+                obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :]))
+            obj_verb_rep = torch.stack(obj_verb_rep_fu)
+            obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
         outputs_verb_class = self.verb_class_embed(obj_verb_rep)
         # [C(3),B,num_queries(100),num_verb_classes(29)]
         out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
@@ -176,8 +187,12 @@ class CDNHOICompo(nn.Module):
         self.obj_class_embed = nn.Linear(hidden_dim, num_obj_classes + 1)
         self.fusion_mode = fusion_mode
         if self.fusion_mode:
-            self.fusion_module = MLP(hidden_dim*2, hidden_dim*2, hidden_dim*2, 1)
-            #decoder_layer = TransformerDecoderLayer(d_model=args.hidden_dim, nhead=args.nheads, dim_feedforward=args.dim_feedforward,
+            #self.fusion_module = MLP(hidden_dim*2, hidden_dim*2, hidden_dim*2, 1)
+            encoder_layer = TransformerEncoderLayer(d_model=hidden_dim*2, nhead=args.nheads, dim_feedforward=args.dim_feedforward,
+                                                    dropout=args.dropout, normalize_before=args.pre_norm)
+            encoder_norm = nn.LayerNorm(hidden_dim) if args.pre_norm else None
+            self.fusion_module = TransformerEncoder(encoder_layer, 1, encoder_norm)
+            #decoder_layer = TransformerDecoderLayer(d_model=hidden_dim, nhead=args.nheads, dim_feedforward=args.dim_feedforward,
             #                                        dropout=args.dropout, normalize_before=args.pre_norm)
             #decoder_norm = nn.LayerNorm(args.hidden_dim)
             #self.fusion_module = TransformerDecoder(decoder_layer, 1, decoder_norm, return_intermediate=True)
@@ -242,7 +257,15 @@ class CDNHOICompo(nn.Module):
                     outputs_matching = self.matching_embed(hopd_out)
                 obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
             if self.fusion_mode:
-                obj_verb_rep = self.fusion_module(obj_verb_rep)
+                #obj_verb_rep = self.fusion_module(obj_verb_rep)
+                obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
+                obj_verb_rep_fu = []
+                for m in range(obj_verb_rep.shape[0]):
+                    obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :]))
+                obj_verb_rep = torch.stack(obj_verb_rep_fu)
+                obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
+                #obj_verb_rep = self.fusion_module(obj_verb_rep, src_key_padding_mask=rep_mask)
+                #memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
             outputs_verb_class = self.verb_class_embed(obj_verb_rep)
             # [num_decoder_layers(3),B,num_queries(100),num_verb_classes(29)]
             out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
@@ -355,7 +378,14 @@ class CDNHOICompo(nn.Module):
 
         obj_verb_rep_compo = torch.cat((instance_out_compo, interaction_decoder_out_compo), dim=3)
         if self.fusion_mode:
-            obj_verb_rep_compo = self.fusion_module(obj_verb_rep_compo)
+            # obj_verb_rep = self.fusion_module(obj_verb_rep_compo)
+            obj_verb_rep_compo = obj_verb_rep_compo.permute(0, 2, 1, 3)
+            #rep_mask = torch.ones(obj_verb_rep_compo.shape[2], obj_verb_rep_compo.shape[1]).bool().to(obj_verb_rep_compo.device)
+            obj_verb_rep_compo_fu = []
+            for m in range(obj_verb_rep_compo.shape[0]):
+                obj_verb_rep_compo_fu.append(self.fusion_module(obj_verb_rep_compo[m, :, :, :]))
+            obj_verb_rep_compo = torch.stack(obj_verb_rep_compo_fu)
+            obj_verb_rep_compo = obj_verb_rep_compo.permute(0, 2, 1, 3)
         if human_out is None:
             outputs_sub_coord = self.sub_bbox_embed(instance_out_compo).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
         else:
@@ -417,7 +447,13 @@ class CDNHOICompo(nn.Module):
                 outputs_matching = self.matching_embed(hopd_out)
             obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
         if self.fusion_mode:
-            obj_verb_rep = self.fusion_module(obj_verb_rep)
+            # obj_verb_rep = self.fusion_module(obj_verb_rep)
+            obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
+            obj_verb_rep_fu = []
+            for m in range(obj_verb_rep.shape[0]):
+                obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :]))
+            obj_verb_rep = torch.stack(obj_verb_rep_fu)
+            obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
         outputs_verb_class = self.verb_class_embed(obj_verb_rep)
         # [C(3),B,num_queries(100),num_verb_classes(29)]
         out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],

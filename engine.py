@@ -166,12 +166,14 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             batch_weight = batch_weight_list[batch_weight_mode]
             losses_list = []
             losses_avg = 0
+            is_uctt = False
             for i in range(len(outputs)):
                 loss_dict = criterion(outputs[i], targets[i])
                 weight_dict = criterion.weight_dict
                 losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
                 losses_list.append(losses)
                 if 'loss_uctt' in loss_dict.keys():
+                    is_uctt = True
                     batch_weight[i] = -loss_dict['loss_uctt']
 
                 # reduce losses over all GPUs for logging purposes
@@ -192,7 +194,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
             #print(batch_weight)
             #batch_weight = batch_weight / batch_weight.sum()
-            batch_weight = torch.nn.functional.softmax(batch_weight,dim=0)
+            if is_uctt:
+                batch_weight = torch.nn.functional.softmax(batch_weight,dim=0)
             #print(batch_weight)
             #batch_weight_sum = sum(batch_weight)
             for i in range(len(outputs)):
