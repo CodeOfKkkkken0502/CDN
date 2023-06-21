@@ -472,6 +472,7 @@ class CDNHOICompo(nn.Module):
         out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
         uctt_verb = None
+        '''
         if self.uncertainty:
             uctt_verb = []
             for i in range(obj_verb_rep.shape[0]):
@@ -479,6 +480,7 @@ class CDNHOICompo(nn.Module):
                 uctt_verb.append(uctt_i)
             uctt_verb = torch.stack(uctt_verb)
             out['uctt_verb'] = uctt_verb[-1]
+        '''
         if self.use_matching:
             out['pred_matching_logits'] = outputs_matching[-1]
         if self.aux_loss:
@@ -551,7 +553,7 @@ class MLP_UCTT(nn.Module):
                 self.layers.append(nn.ReLU())
             else:
                 self.layers.append(nn.Linear(hidden_dim, output_dim))
-                self.layers.append(nn.Tanh())
+                #self.layers.append(nn.ReLU())
 
     def forward(self, x):
         orig_num_queries = x.shape[1]
@@ -819,14 +821,15 @@ class SetCriterionHOI(nn.Module):
     def loss_verb_uctt(self, outputs, targets, indices, num_interactions):
         assert 'pred_verb_logits' in outputs
         src_logits = outputs['pred_verb_logits']  # [B,num_queries,num_verb_classes]
-        if not src_logits.shape[1]:
-            losses = {'loss_uctt': torch.tensor(0., requires_grad=True, device=src_logits.device),
-                      'loss_verb_uctt': torch.tensor(0., requires_grad=True, device=src_logits.device)}
-            return losses
         uncertainty = None
         if 'uctt_verb' in outputs:
             uncertainty = outputs['uctt_verb']
+        if not src_logits.shape[1] or uncertainty is None:
+            losses = {'loss_uctt': torch.tensor(0., requires_grad=True, device=src_logits.device),
+                      'loss_verb_uctt': torch.tensor(0., requires_grad=True, device=src_logits.device)}
+            return losses
 
+        '''
         idx = self._get_src_permutation_idx(indices)
         target_classes_o = torch.cat([t['verb_labels'][J] for t, (_, J) in zip(targets, indices)])
         target_classes = torch.zeros_like(src_logits)
@@ -845,10 +848,13 @@ class SetCriterionHOI(nn.Module):
             uctt_avg = torch.log(torch.mean(torch.exp(uctt_match_batch)))
         else:
             uctt_avg = torch.log(torch.mean(torch.exp(uncertainty)))
+        '''
+        uctt_avg = torch.log(torch.mean(torch.exp(uncertainty)))
 
         # src_logits = src_logits.sigmoid()*torch.exp(-uncertainty)*pos_inds
         #loss_verb_uctt = torch.nn.functional.binary_cross_entropy_with_logits(src_logits, target_classes)
 
+        '''
         orig_num_queries = src_logits.shape[1]
         if self.w_uctt.shape[1] > orig_num_queries:
             padding = torch.zeros(src_logits.shape[0], self.w_uctt.shape[1] - orig_num_queries, src_logits.shape[2]).to(src_logits.device)
@@ -857,20 +863,82 @@ class SetCriterionHOI(nn.Module):
         src_logits = src_logits * torch.exp(self.w_uctt - uncertainty) + self.c_uctt
         src_logits = src_logits[:, :orig_num_queries, :].sigmoid() * pos_inds
         loss_verb_uctt = torch.nn.functional.binary_cross_entropy(src_logits, target_classes) * torch.exp(-uctt_avg)
+        '''
         losses = {'loss_uctt': uctt_avg,
-                  'loss_verb_uctt': uctt_avg + loss_verb_uctt}
+                  'loss_verb_uctt': uctt_avg * torch.exp(2*uctt_avg)}
         return losses
 
     def _neg_loss(self, pred, gt, uctt, weights=None, alpha=0.25):
         pos_inds = gt.gt(0.5).float()
         neg_inds = gt.lt(0.5).float()
-        '''
-        if uctt is not None:
-            pred = pred * torch.exp(-uctt)
-        pred = pred.sigmoid()
-        '''
 
         loss = 0
+        #uctt+focal25/3
+        '''
+        if uctt is not None:
+            #pred_ = (1 - uctt) * pred + uctt
+            #pos_loss = torch.log(pred_) * torch.pow(1 - pred_, 2) - 0.2 * uctt
+            pos_loss = torch.log(pred) * torch.pow(1 - pred, 2) * torch.exp(-uctt) - uctt
+            pos_loss = alpha * pos_loss * pos_inds
+        else:
+            pos_loss = alpha * torch.log(pred) * torch.pow(1 - pred, 2) * pos_inds  # [B,num_queries,num_verb_classes]
+        if weights is not None:
+            pos_loss = pos_loss * weights[:-1]
+
+        if uctt is not None:
+            #pred_ = (1 - uctt) * pred
+            #neg_loss = torch.log(1 - pred_) * torch.pow(pred_, 2) - 0.2 * uctt
+            neg_loss = torch.log(1 - pred) * torch.pow(pred, 2) * torch.exp(-uctt) - uctt
+            neg_loss = (1 - alpha) * neg_loss * neg_inds
+        else:
+            neg_loss = (1 - alpha) * torch.log(1 - pred) * torch.pow(pred, 2) * neg_inds  # [B,num_queries,num_verb_classes]
+        '''
+        '''
+        num_pos = pos_inds.float().sum()
+        num_neg = neg_inds.float().sum()
+        if uctt is not None:
+            if num_pos == 0:
+                pos_uctt = torch.log(torch.mean(torch.exp(uctt)))
+            else:
+                pos_uctt = torch.exp(uctt) * pos_inds
+                pos_uctt = pos_uctt.sum() / num_pos
+                pos_uctt = torch.log(pos_uctt)
+            pos_loss = torch.log(pred) * torch.pow(1 - pred, 2) * pos_inds
+            pos_loss = pos_loss.sum()
+            pos_loss = torch.exp(-pos_uctt) * pos_loss - pos_uctt
+            if weights is not None:
+                pos_loss = pos_loss * weights[:-1]
+
+            neg_uctt = torch.exp(uctt) * neg_inds
+            neg_uctt = neg_uctt.sum() / num_neg
+            neg_uctt = torch.log(neg_uctt)
+            neg_loss = torch.log(1 - pred) * torch.pow(pred, 2) * neg_inds
+            neg_loss = neg_loss.sum()
+            neg_loss = torch.exp(-neg_uctt) * neg_loss - neg_uctt
+            #print(num_pos,pos_loss,num_neg,neg_loss)
+
+        else:
+            pos_loss = alpha * torch.log(pred) * torch.pow(1 - pred, 2) * pos_inds  # [B,num_queries,num_verb_classes]
+            if weights is not None:
+                pos_loss = pos_loss * weights[:-1]
+
+            neg_loss = (1 - alpha) * torch.log(1 - pred) * torch.pow(pred, 2) * neg_inds  # [B,num_queries,num_verb_classes]
+            pos_loss = pos_loss.sum()
+            neg_loss = neg_loss.sum()
+        '''
+
+        #if uctt is not None:
+            #uctt+focal21
+            #pos_loss = pos_loss + 0.001 * alpha * (1 - pred) * uctt * pos_inds
+            #neg_loss = neg_loss + 0.001 * (1 - alpha) * pred * uctt * neg_inds
+
+            #uctt+focal22
+            #pos_loss = pos_loss - 0.001 * alpha * (pred - 0.75) * uctt * pos_inds
+            #neg_loss = neg_loss - 0.001 * (1 - alpha) * (0.25 - pred) * uctt * neg_inds
+
+            #uctt+focal23
+            #pos_loss = pos_loss * (1 + (pred - 0.5) * uctt * pos_inds)
+            #neg_loss = neg_loss * (1 + (0.5 - pred) * uctt * pos_inds)
 
         pos_loss = alpha * torch.log(pred) * torch.pow(1 - pred, 2) * pos_inds  # [B,num_queries,num_verb_classes]
         if weights is not None:
@@ -878,10 +946,9 @@ class SetCriterionHOI(nn.Module):
 
         neg_loss = (1 - alpha) * torch.log(1 - pred) * torch.pow(pred, 2) * neg_inds  # [B,num_queries,num_verb_classes]
 
-        num_pos  = pos_inds.float().sum()
+        num_pos = pos_inds.float().sum()
         pos_loss = pos_loss.sum()
         neg_loss = neg_loss.sum()
-
         if num_pos == 0:
             loss = loss - neg_loss
         else:
@@ -1025,7 +1092,7 @@ def build(args):
             args=args
         )
     else:
-        model = CDNHOI(
+        model = CDNHOI2(
             backbone,
             cdn,
             num_obj_classes=args.num_obj_classes,
@@ -1044,7 +1111,7 @@ def build(args):
     weight_dict['loss_sub_giou'] = args.giou_loss_coef
     weight_dict['loss_obj_giou'] = args.giou_loss_coef
     if args.uncertainty:
-        weight_dict['loss_verb_uctt'] = 1
+        weight_dict['loss_verb_uctt'] = 1 #10
         weight_dict['loss_uctt'] = 0
     if args.use_matching:
         weight_dict['loss_matching'] = args.matching_loss_coef

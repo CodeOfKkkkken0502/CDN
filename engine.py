@@ -95,7 +95,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     cross_verb_labels = torch.cat(verb_labels_compo, 0)[0:num_HO_max]
                     cross_sub_boxes = torch.cat(sub_boxes_compo, 0)[0:num_HO_max]
                     cross_obj_boxes = torch.cat(obj_boxes_compo, 0)[0:num_HO_max]
-                    cross_matching_labels = torch.ones(target_compo['verb_labels'].shape[0], device=cross_obj_labels.device)
+                    cross_matching_labels = torch.ones(target_compo['verb_labels'].shape[0], dtype=torch.long, device=cross_obj_labels.device)
                 else:
                     device = target_compo['obj_labels'].device
                     cross_obj_labels = torch.Tensor(0).long().to(device)
@@ -145,7 +145,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     self_verb_labels = torch.cat(verb_labels_compo, 0)[0:num_HO_max]
                     self_sub_boxes = torch.cat(sub_boxes_compo, 0)[0:num_HO_max]
                     self_obj_boxes = torch.cat(obj_boxes_compo, 0)[0:num_HO_max]
-                    self_matching_labels = torch.ones(target_compo['verb_labels'].shape[0], device=cross_matching_labels.device)
+                    self_matching_labels = torch.ones(target_compo['verb_labels'].shape[0], dtype=torch.long, device=cross_matching_labels.device)
                     target_compo['obj_labels'] = torch.cat((cross_obj_labels, self_obj_labels))
                     target_compo['verb_labels'] = torch.cat((cross_verb_labels, self_verb_labels))
                     target_compo['sub_boxes'] = torch.cat((cross_sub_boxes, self_sub_boxes))
@@ -182,16 +182,55 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                                  [0, 1]])
             batch_weight = batch_weight_list[batch_weight_mode]
             losses_list = []
+            uctt_list=[]
             losses_avg = 0
-            is_uctt = False
+            #is_uctt = False
             for i in range(len(outputs)):
                 loss_dict = criterion(outputs[i], targets[i])
                 weight_dict = criterion.weight_dict
-                losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
-                losses_list.append(losses)
+
                 if 'loss_uctt' in loss_dict.keys():
-                    is_uctt = True
-                    batch_weight[i] = -loss_dict['loss_uctt']
+                    # print(i)
+                    # for j in range(3):
+                    #    print(layer_losses[j],torch.log(layer_losses[j]))
+                    uctt_avg = torch.log((torch.exp(loss_dict['loss_uctt']) +
+                                          torch.exp(loss_dict['loss_uctt_0']) +
+                                          torch.exp(loss_dict['loss_uctt_1']))/3)
+                    uctt_list.append(uctt_avg)
+
+                    batch_weight_avg = (torch.exp(-loss_dict['loss_uctt']) +
+                                        torch.exp(-loss_dict['loss_uctt_0']) +
+                                        torch.exp(-loss_dict['loss_uctt_1']))/3
+                    batch_weight[i] = batch_weight_avg
+
+                    #loss_dict['loss_verb_ce'] = loss_dict['loss_verb_ce'] * torch.exp(-loss_dict['loss_uctt'])
+                    #loss_dict['loss_verb_ce_0'] = loss_dict['loss_verb_ce_0'] * torch.exp(-loss_dict['loss_uctt_0'])
+                    #loss_dict['loss_verb_ce_1'] = loss_dict['loss_verb_ce_1'] * torch.exp(-loss_dict['loss_uctt_1'])
+                    #losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+
+                    #uctt+focal31
+                    layer_losses = []
+                    layer_losses.append(sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if
+                                            k in weight_dict and '_0' not in k and '_1' not in k))
+                    layer_losses.append(sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if
+                                            k in weight_dict and '_0' in k))
+                    layer_losses.append(sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if
+                                            k in weight_dict and '_1' in k))
+                    layer_losses[0] = layer_losses[0] * torch.exp(-2*loss_dict['loss_uctt'])
+                    layer_losses[1] = layer_losses[1] * torch.exp(-2*loss_dict['loss_uctt_0'])
+                    layer_losses[2] = layer_losses[2] * torch.exp(-2*loss_dict['loss_uctt_1'])
+                    losses = sum(layer_losses)
+
+                    #loss_dict['loss_verb_ce'] = loss_dict['loss_verb_ce'] * torch.exp(-2 * loss_dict['loss_uctt'])
+                    #loss_dict['loss_verb_ce_0'] = loss_dict['loss_verb_ce_0'] * torch.exp(-2 * loss_dict['loss_uctt_0'])
+                    #loss_dict['loss_verb_ce_1'] = loss_dict['loss_verb_ce_1'] * torch.exp(-2 * loss_dict['loss_uctt_1'])
+                else:
+                    losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+                losses_list.append(losses)
+                #if 'loss_uctt' in loss_dict.keys():
+                    #is_uctt = True
+                    #batch_weight[i] = -loss_dict['loss_uctt']
+                    #batch_weight[i] = torch.exp(-2*loss_dict['loss_uctt'])
 
                 # reduce losses over all GPUs for logging purposes
                 loss_dict_reduced = utils.reduce_dict(loss_dict)
@@ -211,13 +250,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
             #print(batch_weight)
             #batch_weight = batch_weight / batch_weight.sum()
-            if is_uctt:
-                batch_weight = torch.softmax(batch_weight,dim=0)
+            #if is_uctt:
+            #    batch_weight = torch.softmax(batch_weight,dim=0)
             #print(batch_weight)
             #batch_weight_sum = sum(batch_weight)
             for i in range(len(outputs)):
                 #batch_weight[i] = batch_weight[i] / batch_weight_sum
-                losses_avg += batch_weight[i] * losses_list[i]
+                losses_avg += losses_list[i]
             accum_iter = int(8 / half_bs)
             losses_avg = losses_avg / accum_iter
             losses_avg.backward()
@@ -230,6 +269,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
             metric_logger.update(batch_weight_orig=batch_weight[0].item(),batch_weight_compo=batch_weight[1].item())
             metric_logger.update(loss_orig=losses_list[0].item(), loss_compo=losses_list[1].item())
+            if len(uctt_list):
+                metric_logger.update(uctt_orig=uctt_list[0].item(), uctt_compo=uctt_list[1].item())
             metric_logger.update(loss=losses_avg, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
             if hasattr(criterion, 'loss_labels'):
                 metric_logger.update(class_error=loss_dict_reduced['class_error'])
