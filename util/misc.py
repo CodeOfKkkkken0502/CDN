@@ -11,9 +11,9 @@ import torch.distributed as dist
 from torch import Tensor
 
 import torchvision
-if float(torchvision.__version__[:3]) < 0.7:
-    from torchvision.ops import _new_empty_tensor
-    from torchvision.ops.misc import _output_size
+if int(torchvision.__version__.split('.')[1]) < 7:
+   from torchvision.ops import _new_empty_tensor
+   from torchvision.ops.misc import _output_size
 
 
 class SmoothedValue(object):
@@ -346,7 +346,7 @@ def init_distributed_mode(args):
     args.distributed = True
 
     torch.cuda.set_device(args.gpu)
-    args.dist_backend = 'gloo'
+    args.dist_backend = 'nccl'
     print('| distributed init (rank {}): {}'.format(
         args.rank, args.dist_url), flush=True)
     torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,

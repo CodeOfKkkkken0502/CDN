@@ -22,7 +22,7 @@ from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate,
                        is_dist_avail_and_initialized)
-from models.hoi import CDNCompo, CDNHOI, CDNHOI2
+from models.hoi import CDNHOICompo, CDNHOI, CDNHOI2
 
 
 class CDNHOI(nn.Module):
@@ -236,7 +236,7 @@ class PostProcessHOI(nn.Module):
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
-    parser.add_argument('--batch_size', default=2, type=int)
+    parser.add_argument('--batch_size', default=1, type=int)
 
     # * Backbone
     parser.add_argument('--backbone', default='resnet50', type=str,
@@ -285,6 +285,19 @@ def get_args_parser():
     parser.add_argument('--nms_alpha', default=1, type=float)
     parser.add_argument('--nms_beta', default=0.5, type=float)
 
+    parser.add_argument('--compo', action='store_true', help='Use compositional model')
+    parser.add_argument('--decouple', action='store_true', help='Decouple HO-pair and interaction representations')
+    parser.add_argument('--remove', default=True, help='Remove infeasible compositions')
+    parser.add_argument('--batch_weight_mode', default=0, type=int, help='Weights for original and composed samples')
+    parser.add_argument('--fusion_mode', default=0, type=int,
+                        help='Way to fuse HO-pair and interaction representations')
+    parser.add_argument('--uncertainty', action='store_true', help='Use uncertainty quantification')
+    parser.add_argument('--label_smoothing', action='store_true', help='Label smoothing for composite samples')
+    parser.add_argument('--recouple', action='store_true', help='Use interaction_decoder_out to initialize hopd_out')
+    parser.add_argument('--separate', action='store_true', help='Separate decoders for human, object and interaction')
+    parser.add_argument('--zero_shot_type', default='default', help='Zero-shot type')
+    parser.add_argument('--clip_model', default='ViT-B/32', help='clip pretrained model path')
+
     return parser
 
 
@@ -321,7 +334,7 @@ def main(args):
     args.masks = False
     backbone = build_backbone(args)
     cdn = build_cdn(args)
-    model = CDNCompo(
+    model = CDNHOI(
         backbone,
         cdn,
         num_obj_classes=len(valid_obj_ids) + 1,

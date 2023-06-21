@@ -34,9 +34,9 @@ class HungarianMatcherHOI(nn.Module):
 
         cost_obj_class = -out_obj_prob[:, tgt_obj_labels]  # [B*num_queries(100),num_hois_in_batch]
 
-        cost_verb_class = -(out_verb_prob.matmul(tgt_verb_labels_permute) / \
-                            (tgt_verb_labels_permute.sum(dim=0, keepdim=True) + 1e-4) + \
-                            (1 - out_verb_prob).matmul(1 - tgt_verb_labels_permute) / \
+        cost_verb_class = -(out_verb_prob.matmul(tgt_verb_labels_permute) /
+                            (tgt_verb_labels_permute.sum(dim=0, keepdim=True) + 1e-4) +
+                            (1 - out_verb_prob).matmul(1 - tgt_verb_labels_permute) /
                             ((1 - tgt_verb_labels_permute).sum(dim=0, keepdim=True) + 1e-4)) / 2
         # [B*num_queries(100),num_hois_in_batch]
         cost_sub_bbox = torch.cdist(out_sub_bbox, tgt_sub_boxes, p=1)  # [B*num_queries(100),num_hois_in_batch]

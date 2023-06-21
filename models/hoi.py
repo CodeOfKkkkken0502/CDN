@@ -17,6 +17,9 @@ from .backbone import build_backbone
 from .matcher import build_matcher
 from .cdn import build_cdn
 from .cdn import TransformerEncoderLayer, TransformerEncoder, TransformerDecoderLayer, TransformerDecoder
+import clip
+from datasets.hico_text_label import hico_text_label, hico_unseen_index
+from datasets.vcoco_text_label import vcoco_hoi_text_label
 
 
 class CDNHOI(nn.Module):
@@ -188,14 +191,15 @@ class CDNHOICompo(nn.Module):
         self.fusion_mode = fusion_mode
         if self.fusion_mode:
             #self.fusion_module = MLP(hidden_dim*2, hidden_dim*2, hidden_dim*2, 1)
-            encoder_layer = TransformerEncoderLayer(d_model=hidden_dim*2, nhead=args.nheads, dim_feedforward=args.dim_feedforward,
-                                                    dropout=args.dropout, normalize_before=args.pre_norm)
-            encoder_norm = nn.LayerNorm(hidden_dim) if args.pre_norm else None
-            self.fusion_module = TransformerEncoder(encoder_layer, 1, encoder_norm)
-            #decoder_layer = TransformerDecoderLayer(d_model=hidden_dim, nhead=args.nheads, dim_feedforward=args.dim_feedforward,
+            #encoder_layer = TransformerEncoderLayer(d_model=hidden_dim*2, nhead=args.nheads, dim_feedforward=args.dim_feedforward,
             #                                        dropout=args.dropout, normalize_before=args.pre_norm)
-            #decoder_norm = nn.LayerNorm(args.hidden_dim)
-            #self.fusion_module = TransformerDecoder(decoder_layer, 1, decoder_norm, return_intermediate=True)
+            #encoder_norm = nn.LayerNorm(hidden_dim) if args.pre_norm else None
+            #self.fusion_module = TransformerEncoder(encoder_layer, 1, encoder_norm)
+            decoder_layer = TransformerDecoderLayer(d_model=hidden_dim*2, nhead=args.nheads, dim_feedforward=args.dim_feedforward,
+                                                    dropout=args.dropout, normalize_before=args.pre_norm)
+            decoder_norm = nn.LayerNorm(hidden_dim*2)
+            self.fusion_module = TransformerDecoder(decoder_layer, 1, decoder_norm)
+            self.text_embedding = init_CLIP_text_embed(args)
         self.verb_class_embed = nn.Linear(hidden_dim * 2, num_verb_classes)
         self.sub_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         self.obj_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
@@ -261,11 +265,13 @@ class CDNHOICompo(nn.Module):
                 obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
                 obj_verb_rep_fu = []
                 for m in range(obj_verb_rep.shape[0]):
-                    obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :]))
+                    #obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :]))
+                    obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :], self.text_embedding))
                 obj_verb_rep = torch.stack(obj_verb_rep_fu)
                 obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
-                #obj_verb_rep = self.fusion_module(obj_verb_rep, src_key_padding_mask=rep_mask)
-                #memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
+
+                # tgt.shape: torch.Size([num_queries, bs, hidden_dim])
+                # memory.shape: torch.Size([h*w, bs, hidden_dim])
             outputs_verb_class = self.verb_class_embed(obj_verb_rep)
             # [num_decoder_layers(3),B,num_queries(100),num_verb_classes(29)]
             out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
@@ -320,11 +326,11 @@ class CDNHOICompo(nn.Module):
                 instance_out_1 = instance_out[:, i, indices[i][0][j], :]
                 for k in range(num_HO[1]):
                     interaction_decoder_out_2 = interaction_decoder_out[:, index, indices[index][0][k], :]
-                    instance_out_compo_list.append(instance_out_1)
+                    instance_out_compo_list.append(instance_out_1.clone())
                     if human_out is not None:
                         human_out_1 = human_out[:, i, indices[i][0][j], :]
-                        human_out_compo_list.append(human_out_1)
-                    interaction_decoder_out_compo_list.append(interaction_decoder_out_2)
+                        human_out_compo_list.append(human_out_1.clone())
+                    interaction_decoder_out_compo_list.append(interaction_decoder_out_2.clone())
             instance_out_compo_list = instance_out_compo_list[0:100]
             if human_out is not None:
                 human_out_compo_list = human_out_compo_list[0:100]
@@ -335,11 +341,11 @@ class CDNHOICompo(nn.Module):
                 for l in range(num_HO[0]):
                     if l != j:
                         interaction_decoder_out_1 = interaction_decoder_out[:, i, indices[i][0][l], :]
-                        instance_out_compo_list.append(instance_out_1)
+                        instance_out_compo_list.append(instance_out_1.clone())
                         if human_out is not None:
                             human_out_1 = human_out[:, i, indices[i][0][j], :]
-                            human_out_compo_list.append(human_out_1)
-                        interaction_decoder_out_compo_list.append(interaction_decoder_out_1)
+                            human_out_compo_list.append(human_out_1.clone())
+                        interaction_decoder_out_compo_list.append(interaction_decoder_out_1.clone())
             instance_out_compo_list = instance_out_compo_list[0:200]
             if human_out is not None:
                 human_out_compo_list = human_out_compo_list[0:200]
@@ -352,11 +358,16 @@ class CDNHOICompo(nn.Module):
                     human_out_compo_1 = torch.stack(human_out_compo_list, dim=1)
                 num_queries.append(interaction_decoder_out_compo_1.shape[1])
             else:
-                instance_out_compo_1 = instance_out[:,i,:,:].clone()
+                instance_out_compo_1 = torch.randn(
+                    [instance_out[:, i, :, :].shape[0], 0, instance_out[:, i, :, :].shape[2]],
+                    requires_grad=True, device=instance_out[:, i, :, :].device)
                 if human_out is not None:
-                    human_out_compo_1 = human_out[:,i,:,:].clone()
-                interaction_decoder_out_compo_1 = interaction_decoder_out[:,index,:,:].clone()
-                num_queries.append(instance_out[:, i, :, :].shape[1])
+                    human_out_compo_1 = torch.randn([human_out[:, i, :, :].shape[0], 0, human_out[:, i, :, :].shape[2]],
+                                                    requires_grad=True, device=human_out[:, i, :, :].device)
+                interaction_decoder_out_compo_1 = torch.randn(
+                    [interaction_decoder_out[:, i, :, :].shape[0], 0, interaction_decoder_out[:, i, :, :].shape[2]],
+                    requires_grad=True, device=interaction_decoder_out[:, i, :, :].device)
+                num_queries.append(instance_out_compo_1.shape[1])
             if human_out is not None:
                 human_out_compo.append(human_out_compo_1)
             instance_out_compo.append(instance_out_compo_1)
@@ -383,7 +394,8 @@ class CDNHOICompo(nn.Module):
             #rep_mask = torch.ones(obj_verb_rep_compo.shape[2], obj_verb_rep_compo.shape[1]).bool().to(obj_verb_rep_compo.device)
             obj_verb_rep_compo_fu = []
             for m in range(obj_verb_rep_compo.shape[0]):
-                obj_verb_rep_compo_fu.append(self.fusion_module(obj_verb_rep_compo[m, :, :, :]))
+                #obj_verb_rep_compo_fu.append(self.fusion_module(obj_verb_rep_compo[m, :, :, :]))
+                obj_verb_rep_compo_fu.append(self.fusion_module(obj_verb_rep_compo[m, :, :, :], self.text_embedding))
             obj_verb_rep_compo = torch.stack(obj_verb_rep_compo_fu)
             obj_verb_rep_compo = obj_verb_rep_compo.permute(0, 2, 1, 3)
         if human_out is None:
@@ -451,7 +463,8 @@ class CDNHOICompo(nn.Module):
             obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
             obj_verb_rep_fu = []
             for m in range(obj_verb_rep.shape[0]):
-                obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :]))
+                #obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :]))
+                obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :], self.text_embedding))
             obj_verb_rep = torch.stack(obj_verb_rep_fu)
             obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
         outputs_verb_class = self.verb_class_embed(obj_verb_rep)
@@ -531,12 +544,13 @@ class MLP_UCTT(nn.Module):
         self.num_queries = 200
         h = [hidden_dim] * (num_layers - 1)
         self.layers = nn.ModuleList()
-        for i, dims in enumerate(zip([input_dim] + h, h + [output_dim])):
+        for i, dims in enumerate(zip([input_dim] + h, h + [hidden_dim])):
             self.layers.append(nn.Linear(dims[0], dims[1]))
             self.layers.append(nn.BatchNorm1d(self.num_queries))
-            if i < num_layers-1:
+            if i < num_layers - 1:
                 self.layers.append(nn.ReLU())
             else:
+                self.layers.append(nn.Linear(hidden_dim, output_dim))
                 self.layers.append(nn.Tanh())
 
     def forward(self, x):
@@ -569,6 +583,11 @@ class SetCriterionHOI(nn.Module):
 
         self.alpha = args.alpha
         self.uncertainty = args.uncertainty
+        if self.uncertainty:
+            self.w_uctt = nn.Parameter(torch.Tensor(2, num_queries*2, num_verb_classes))
+            self.c_uctt = nn.Parameter(torch.Tensor(2, num_queries*2, num_verb_classes))
+            nn.init.xavier_uniform_(self.w_uctt)
+            nn.init.xavier_uniform_(self.c_uctt)
 
         if args.dataset_file == 'hico':
             self.obj_nums_init = [1811, 9462, 2415, 7249, 1665, 3587, 1396, 1086, 10369, 800,
@@ -651,6 +670,11 @@ class SetCriterionHOI(nn.Module):
     def loss_obj_labels(self, outputs, targets, indices, num_interactions, log=True):
         assert 'pred_obj_logits' in outputs
         src_logits = outputs['pred_obj_logits']  #[B,num_queries,num_obj_classes]
+        if not src_logits.shape[1]:
+            losses = {'loss_obj_ce': torch.tensor(0., requires_grad=True, device=src_logits.device)}
+            if log:
+                losses['obj_class_error'] = torch.tensor(0., requires_grad=True, device=src_logits.device)
+            return losses
 
         idx = self._get_src_permutation_idx(indices)
         target_classes_o = torch.cat([t['obj_labels'][J] for t, (_, J) in zip(targets, indices)])
@@ -691,6 +715,9 @@ class SetCriterionHOI(nn.Module):
     def loss_obj_cardinality(self, outputs, targets, indices, num_interactions):
         pred_logits = outputs['pred_obj_logits']  #[B,num_queries,num_obj_classes+1]
         device = pred_logits.device
+        if not pred_logits.shape[1]:
+            losses = {'obj_cardinality_error': torch.tensor(0., requires_grad=True, device=device)}
+            return losses
         tgt_lengths = torch.as_tensor([len(v['obj_labels']) for v in targets], device=device)
         card_pred = (pred_logits.argmax(-1) != pred_logits.shape[-1] - 1).sum(1)  #[B]
         card_err = F.l1_loss(card_pred.float(), tgt_lengths.float())
@@ -700,6 +727,9 @@ class SetCriterionHOI(nn.Module):
     def loss_verb_labels(self, outputs, targets, indices, num_interactions):
         assert 'pred_verb_logits' in outputs
         src_logits = outputs['pred_verb_logits']  # [B,num_queries,num_verb_classes]
+        if not src_logits.shape[1]:
+            losses = {'loss_verb_ce': torch.tensor(0., requires_grad=True, device=src_logits.device)}
+            return losses
         uncertainty = None
         if 'uctt_verb' in outputs:
             uncertainty = outputs['uctt_verb']
@@ -789,6 +819,10 @@ class SetCriterionHOI(nn.Module):
     def loss_verb_uctt(self, outputs, targets, indices, num_interactions):
         assert 'pred_verb_logits' in outputs
         src_logits = outputs['pred_verb_logits']  # [B,num_queries,num_verb_classes]
+        if not src_logits.shape[1]:
+            losses = {'loss_uctt': torch.tensor(0., requires_grad=True, device=src_logits.device),
+                      'loss_verb_uctt': torch.tensor(0., requires_grad=True, device=src_logits.device)}
+            return losses
         uncertainty = None
         if 'uctt_verb' in outputs:
             uncertainty = outputs['uctt_verb']
@@ -815,11 +849,16 @@ class SetCriterionHOI(nn.Module):
         # src_logits = src_logits.sigmoid()*torch.exp(-uncertainty)*pos_inds
         #loss_verb_uctt = torch.nn.functional.binary_cross_entropy_with_logits(src_logits, target_classes)
 
-        src_logits = src_logits * torch.exp(-uncertainty)
-        src_logits = src_logits.sigmoid() * pos_inds
+        orig_num_queries = src_logits.shape[1]
+        if self.w_uctt.shape[1] > orig_num_queries:
+            padding = torch.zeros(src_logits.shape[0], self.w_uctt.shape[1] - orig_num_queries, src_logits.shape[2]).to(src_logits.device)
+            src_logits = torch.cat((src_logits, padding), dim=1)
+            uncertainty = torch.cat((uncertainty, padding), dim=1)
+        src_logits = src_logits * torch.exp(self.w_uctt - uncertainty) + self.c_uctt
+        src_logits = src_logits[:, :orig_num_queries, :].sigmoid() * pos_inds
         loss_verb_uctt = torch.nn.functional.binary_cross_entropy(src_logits, target_classes) * torch.exp(-uctt_avg)
         losses = {'loss_uctt': uctt_avg,
-                  'loss_verb_uctt': uctt_avg+loss_verb_uctt}
+                  'loss_verb_uctt': uctt_avg + loss_verb_uctt}
         return losses
 
     def _neg_loss(self, pred, gt, uctt, weights=None, alpha=0.25):
@@ -875,7 +914,12 @@ class SetCriterionHOI(nn.Module):
     def forward(self, outputs, targets):
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
-        indices = self.matcher(outputs_without_aux, targets)
+        if outputs_without_aux['pred_obj_logits'].shape[1]:
+            indices = self.matcher(outputs_without_aux, targets)
+        else:
+            dvc = outputs_without_aux['pred_obj_logits'].device
+            indices = [(torch.Tensor(0).long().to(dvc), torch.Tensor(0).long().to(dvc)),
+                       (torch.Tensor(0).long().to(dvc), torch.Tensor(0).long().to(dvc))]
 
         num_interactions = sum(len(t['obj_labels']) for t in targets)
         num_interactions = torch.as_tensor([num_interactions], dtype=torch.float, device=next(iter(outputs.values())).device)
@@ -890,7 +934,11 @@ class SetCriterionHOI(nn.Module):
 
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
-                indices = self.matcher(aux_outputs, targets)
+                if aux_outputs['pred_obj_logits'].shape[1]:
+                    indices = self.matcher(aux_outputs, targets)
+                else:
+                    indices = [(torch.Tensor(0).long().to(dvc), torch.Tensor(0).long().to(dvc)),
+                               (torch.Tensor(0).long().to(dvc), torch.Tensor(0).long().to(dvc))]
                 for loss in self.losses:
                     kwargs = {}
                     if loss == 'obj_labels':
@@ -977,7 +1025,7 @@ def build(args):
             args=args
         )
     else:
-        model = CDNHOI2(
+        model = CDNHOI(
             backbone,
             cdn,
             num_obj_classes=args.num_obj_classes,
@@ -1023,3 +1071,33 @@ def build(args):
     postprocessors = {'hoi': PostProcessHOI(args)}
 
     return model, criterion, postprocessors
+def init_CLIP_text_embed(args):
+    if args.dataset_file == 'hico':
+        hoi_text_label = hico_text_label
+        unseen_index = hico_unseen_index
+    elif args.dataset_file == 'vcoco':
+        hoi_text_label = vcoco_hoi_text_label
+        unseen_index = None
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if unseen_index is not None:
+        hoi_text_label_del = {}
+        unseen_index_list = unseen_index.get(args.zero_shot_type, [])
+        for idx, k in enumerate(hoi_text_label.keys()):
+            if idx in unseen_index_list:
+                continue
+            else:
+                hoi_text_label_del[k] = hoi_text_label[k]
+    else:
+        hoi_text_label_del = hoi_text_label.copy()
+
+    text_inputs_del = torch.cat([clip.tokenize(hoi_text_label[id]) for id in hoi_text_label_del.keys()])
+    clip_model, _ = clip.load(args.clip_model, device=device)
+    with torch.no_grad():
+        text_embedding_del = clip_model.encode_text(text_inputs_del.to(device))
+
+    del clip_model
+
+    text_embedding_del = text_embedding_del.unsqueeze(1).repeat(1,2,1)
+
+    return text_embedding_del.float()
