@@ -158,6 +158,8 @@ def get_args_parser():
     parser.add_argument('--recouple', action='store_true', help='Use interaction_decoder_out to initialize hopd_out')
     parser.add_argument('--separate', action='store_true', help='Separate decoders for human, object and interaction')
     parser.add_argument('--zero_shot_type', default='default', help='Zero-shot type')
+    parser.add_argument('--clip_model', default='ViT-B/32', help='clip pretrained model path')
+    parser.add_argument('--vis', action='store_true', help='visualize preds in tensorboard')
 
     return parser
 
@@ -238,6 +240,7 @@ def main(args):
         batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, args.batch_size, drop_last=True)
         data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                        collate_fn=utils.collate_fn, num_workers=args.num_workers)
+        length = len(data_loader_train)
 
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
@@ -286,7 +289,7 @@ def main(args):
                 sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch,
-            args.clip_max_norm, args.remove, args.batch_weight_mode, args.label_smoothing)
+            args.clip_max_norm, args.dataset_file, args.batch_weight_mode, args.label_smoothing, length)
         if tb_writer is not None:
             for k, meter in train_stats.items():
                 tb_writer.add_scalar(k, meter, epoch+(args.freeze_mode*90))

@@ -8,6 +8,7 @@ import copy
 import itertools
 import json
 import torch
+import random
 
 import util.misc as utils
 from datasets.hico_eval import HICOEvaluator
@@ -16,8 +17,8 @@ from datasets.vcoco_eval import VCOCOEvaluator
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0,
-                    remove: bool = False, batch_weight_mode: int = 0,
-                    label_smoothing: bool = False, length: int = 0):
+                    dataset: str = 'vcoco', batch_weight_mode: int = 0,
+                    label_smoothing: bool = False, length: int = 0, seed: int = 0):
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="\t")
@@ -29,6 +30,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 50
     optimizer.zero_grad()
+    if dataset == 'vcoco':
+        is_hico = False
+        obj_vb_matrix = np.load('data/v-coco/vcoco_obj_vb_matrix.npy')
+    elif dataset == 'hico':
+        is_hico = True
+        obj_vb_matrix = np.load('data/hico_20160224_det/hico_obj_vb_matrix.npy')
     if isinstance(data_loader, list):
         obj_vb_matrix_hico = np.load('data/hico_20160224_det/hico_obj_vb_matrix.npy')
         obj_vb_matrix_vcoco = np.load('data/v-coco/vcoco_obj_vb_matrix.npy')
@@ -73,7 +80,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         if not verb_labels.type(torch.uint8).any():
                             if obj_index != 80:
                                 verb_labels = verb_labels[0, :].unsqueeze(0)
-                                if verb_labels.shape[1] == 117:
+                                if is_hico:
                                     verb_labels[0, 57] = 1
                                 verb_labels_compo.append(verb_labels)
                             else:
@@ -84,6 +91,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                                 if verb_labels[k, :].type(torch.uint8).any():
                                     not_zero[k] = True
                             verb_labels = verb_labels[not_zero, :]
+                            #verb_labels = torch.unique(verb_labels, dim=0)
                             verb_labels_compo.append(verb_labels)
                         if is_repeat:
                             obj_labels_compo.append(obj_index.repeat(verb_labels.shape[0]))
@@ -91,11 +99,19 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                             obj_boxes_compo.append(target_compo['obj_boxes'][j,:].repeat(verb_labels.shape[0], 1))
 
                 if len(obj_labels_compo):
-                    cross_obj_labels = torch.cat(obj_labels_compo)[0:num_HO_max]
-                    cross_verb_labels = torch.cat(verb_labels_compo, 0)[0:num_HO_max]
-                    cross_sub_boxes = torch.cat(sub_boxes_compo, 0)[0:num_HO_max]
-                    cross_obj_boxes = torch.cat(obj_boxes_compo, 0)[0:num_HO_max]
-                    cross_matching_labels = torch.ones(target_compo['verb_labels'].shape[0], dtype=torch.long, device=cross_obj_labels.device)
+                    cross_obj_labels = torch.cat(obj_labels_compo)
+                    cross_verb_labels = torch.cat(verb_labels_compo, 0)
+                    cross_sub_boxes = torch.cat(sub_boxes_compo, 0)
+                    cross_obj_boxes = torch.cat(obj_boxes_compo, 0)
+                    cross_matching_labels = torch.ones(cross_obj_labels.shape[0], dtype=torch.long,
+                                                       device=cross_obj_labels.device)
+                    if cross_obj_labels.shape[0] > num_HO_max:
+                        rand_indices = torch.randint(cross_obj_labels.shape[0],(num_HO_max,))
+                        cross_obj_labels = cross_obj_labels[rand_indices]
+                        cross_verb_labels = cross_verb_labels[rand_indices]
+                        cross_sub_boxes = cross_sub_boxes[rand_indices]
+                        cross_obj_boxes = cross_obj_boxes[rand_indices]
+                        cross_matching_labels = cross_matching_labels[rand_indices]
                 else:
                     device = target_compo['obj_labels'].device
                     cross_obj_labels = torch.Tensor(0).long().to(device)
@@ -124,7 +140,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         if not verb_labels.type(torch.uint8).any():
                             if obj_index != 80:
                                 verb_labels = verb_labels[0, :].unsqueeze(0)
-                                if verb_labels.shape[1] == 117:
+                                if is_hico:
                                     verb_labels[0, 57] = 1
                                 verb_labels_compo.append(verb_labels)
                             else:
@@ -135,17 +151,26 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                                 if verb_labels[k, :].type(torch.uint8).any():
                                     not_zero[k] = True
                             verb_labels = verb_labels[not_zero, :]
+                            #verb_labels = torch.unique(verb_labels, dim=0)
                             verb_labels_compo.append(verb_labels)
                         if is_repeat:
                             obj_labels_compo.append(obj_index.repeat(verb_labels.shape[0]))
                             sub_boxes_compo.append(target_compo['sub_boxes'][j, :].repeat(verb_labels.shape[0], 1))
                             obj_boxes_compo.append(target_compo['obj_boxes'][j, :].repeat(verb_labels.shape[0], 1))
                 if len(obj_labels_compo):
-                    self_obj_labels = torch.cat(obj_labels_compo)[0:num_HO_max]
-                    self_verb_labels = torch.cat(verb_labels_compo, 0)[0:num_HO_max]
-                    self_sub_boxes = torch.cat(sub_boxes_compo, 0)[0:num_HO_max]
-                    self_obj_boxes = torch.cat(obj_boxes_compo, 0)[0:num_HO_max]
-                    self_matching_labels = torch.ones(target_compo['verb_labels'].shape[0], dtype=torch.long, device=cross_matching_labels.device)
+                    self_obj_labels = torch.cat(obj_labels_compo)
+                    self_verb_labels = torch.cat(verb_labels_compo, 0)
+                    self_sub_boxes = torch.cat(sub_boxes_compo, 0)
+                    self_obj_boxes = torch.cat(obj_boxes_compo, 0)
+                    self_matching_labels = torch.ones(self_obj_labels.shape[0], dtype=torch.long,
+                                                      device=cross_matching_labels.device)
+                    if self_obj_labels.shape[0] > num_HO_max:
+                        rand_indices = torch.randint(self_obj_labels.shape[0], (num_HO_max,))
+                        self_obj_labels = self_obj_labels[rand_indices]
+                        self_verb_labels = self_verb_labels[rand_indices]
+                        self_sub_boxes = self_sub_boxes[rand_indices]
+                        self_obj_boxes = self_obj_boxes[rand_indices]
+                        self_matching_labels = self_matching_labels[rand_indices]
                     target_compo['obj_labels'] = torch.cat((cross_obj_labels, self_obj_labels))
                     target_compo['verb_labels'] = torch.cat((cross_verb_labels, self_verb_labels))
                     target_compo['sub_boxes'] = torch.cat((cross_sub_boxes, self_sub_boxes))
@@ -184,46 +209,37 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             losses_list = []
             uctt_list=[]
             losses_avg = 0
-            #is_uctt = False
+            is_uctt = False
             for i in range(len(outputs)):
                 loss_dict = criterion(outputs[i], targets[i])
                 weight_dict = criterion.weight_dict
 
                 if 'loss_uctt' in loss_dict.keys():
-                    # print(i)
-                    # for j in range(3):
-                    #    print(layer_losses[j],torch.log(layer_losses[j]))
-                    uctt_avg = torch.log((torch.exp(loss_dict['loss_uctt']) +
-                                          torch.exp(loss_dict['loss_uctt_0']) +
-                                          torch.exp(loss_dict['loss_uctt_1']))/3)
+                    is_uctt = True
+                    layer_uctt = [loss_dict[k] for k in loss_dict.keys() if 'loss_uctt' in k]
+                    uctt_avg = 0
+                    batch_weight_avg = 0
+                    for j in range(len(layer_uctt)):
+                        uctt_avg = uctt_avg + torch.exp(layer_uctt[j]) / len(layer_uctt)
+                        batch_weight_avg = batch_weight_avg + torch.exp(-2 * layer_uctt[j]) / len(layer_uctt)
+                    uctt_avg = torch.log(uctt_avg)
                     uctt_list.append(uctt_avg)
 
-                    batch_weight_avg = (torch.exp(-loss_dict['loss_uctt']) +
-                                        torch.exp(-loss_dict['loss_uctt_0']) +
-                                        torch.exp(-loss_dict['loss_uctt_1']))/3
                     batch_weight[i] = batch_weight_avg
-
-                    #loss_dict['loss_verb_ce'] = loss_dict['loss_verb_ce'] * torch.exp(-loss_dict['loss_uctt'])
-                    #loss_dict['loss_verb_ce_0'] = loss_dict['loss_verb_ce_0'] * torch.exp(-loss_dict['loss_uctt_0'])
-                    #loss_dict['loss_verb_ce_1'] = loss_dict['loss_verb_ce_1'] * torch.exp(-loss_dict['loss_uctt_1'])
-                    #losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
                     #uctt+focal31
                     layer_losses = []
+                    last_key = ['loss_obj_ce', 'obj_class_error', 'loss_verb_ce', 'loss_sub_bbox', 'loss_obj_bbox',
+                                'loss_sub_giou', 'loss_obj_giou', 'obj_cardinality_error', 'loss_uctt', 'loss_verb_uctt']
                     layer_losses.append(sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if
-                                            k in weight_dict and '_0' not in k and '_1' not in k))
-                    layer_losses.append(sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if
-                                            k in weight_dict and '_0' in k))
-                    layer_losses.append(sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if
-                                            k in weight_dict and '_1' in k))
-                    layer_losses[0] = layer_losses[0] * torch.exp(-2*loss_dict['loss_uctt'])
-                    layer_losses[1] = layer_losses[1] * torch.exp(-2*loss_dict['loss_uctt_0'])
-                    layer_losses[2] = layer_losses[2] * torch.exp(-2*loss_dict['loss_uctt_1'])
+                                            k in weight_dict and k in last_key))
+                    for p in range(len(layer_uctt)-1):
+                        layer_losses.append(sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if
+                                            k in weight_dict and str(p) in k))
+                    for m in range(len(layer_uctt)):
+                        layer_losses[m] = layer_losses[m] * torch.exp(-2 * layer_uctt[m])
                     losses = sum(layer_losses)
 
-                    #loss_dict['loss_verb_ce'] = loss_dict['loss_verb_ce'] * torch.exp(-2 * loss_dict['loss_uctt'])
-                    #loss_dict['loss_verb_ce_0'] = loss_dict['loss_verb_ce_0'] * torch.exp(-2 * loss_dict['loss_uctt_0'])
-                    #loss_dict['loss_verb_ce_1'] = loss_dict['loss_verb_ce_1'] * torch.exp(-2 * loss_dict['loss_uctt_1'])
                 else:
                     losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
                 losses_list.append(losses)
@@ -248,15 +264,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     print(loss_dict_reduced)
                     sys.exit(1)
 
-            #print(batch_weight)
-            #batch_weight = batch_weight / batch_weight.sum()
-            #if is_uctt:
-            #    batch_weight = torch.softmax(batch_weight,dim=0)
-            #print(batch_weight)
-            #batch_weight_sum = sum(batch_weight)
             for i in range(len(outputs)):
-                #batch_weight[i] = batch_weight[i] / batch_weight_sum
-                losses_avg += losses_list[i]
+                if is_uctt:
+                    losses_avg += losses_list[i]
+                else:
+                    losses_avg += batch_weight[i] * losses_list[i]
             accum_iter = int(8 / half_bs)
             losses_avg = losses_avg / accum_iter
             losses_avg.backward()
