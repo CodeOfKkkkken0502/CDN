@@ -1,4 +1,5 @@
 import copy
+import random
 import sys
 
 import torch
@@ -18,8 +19,8 @@ from .matcher import build_matcher
 from .cdn import build_cdn
 from .cdn import TransformerEncoderLayer, TransformerEncoder, TransformerDecoderLayer, TransformerDecoder
 import clip
-from datasets.hico_text_label import hico_text_label, hico_unseen_index
-from datasets.vcoco_text_label import vcoco_hoi_text_label
+from datasets.hico_text_label import hico_text_label, hico_unseen_index, hico_vb_text_label
+from datasets.vcoco_text_label import vcoco_hoi_text_label, vcoco_vb_text_label
 
 
 class CDNHOI(nn.Module):
@@ -310,6 +311,7 @@ class CDNHOICompo(nn.Module):
         interaction_decoder_out_compo = []
         num_queries = []
         half_bs = int(interaction_decoder_out.shape[1]/2)
+        num_HO_max = 100
         if obj_out is None:
             instance_out = hopd_out
         else:
@@ -331,10 +333,33 @@ class CDNHOICompo(nn.Module):
                         human_out_1 = human_out[:, i, indices[i][0][j], :]
                         human_out_compo_list.append(human_out_1.clone())
                     interaction_decoder_out_compo_list.append(interaction_decoder_out_2.clone())
-            instance_out_compo_list = instance_out_compo_list[0:100]
+            if len(instance_out_compo_list):
+                cross_instance_out_compo_1 = torch.stack(instance_out_compo_list, dim=1)
+                cross_interaction_decoder_out_compo_1 = torch.stack(interaction_decoder_out_compo_list, dim=1)
+                if human_out is not None:
+                    cross_human_out_compo_1 = torch.stack(human_out_compo_list, dim=1)
+                if cross_instance_out_compo_1.shape[1] > num_HO_max:
+                    rand_indices = torch.randint(cross_instance_out_compo_1.shape[1], (num_HO_max,))
+                    cross_instance_out_compo_1 = cross_instance_out_compo_1[:,rand_indices,:]
+                    cross_interaction_decoder_out_compo_1 = cross_interaction_decoder_out_compo_1[:,rand_indices,:]
+                    if human_out is not None:
+                        cross_human_out_compo_1 = cross_human_out_compo_1[:,rand_indices,:]
+            else:
+                cross_instance_out_compo_1 = torch.randn(
+                    [instance_out[:, i, :, :].shape[0], 0, instance_out[:, i, :, :].shape[2]],
+                    requires_grad=True, device=instance_out[:, i, :, :].device)
+                if human_out is not None:
+                    cross_human_out_compo_1 = torch.randn([human_out[:, i, :, :].shape[0], 0, human_out[:, i, :, :].shape[2]],
+                                                    requires_grad=True, device=human_out[:, i, :, :].device)
+                cross_interaction_decoder_out_compo_1 = torch.randn(
+                    [interaction_decoder_out[:, i, :, :].shape[0], 0, interaction_decoder_out[:, i, :, :].shape[2]],
+                    requires_grad=True, device=interaction_decoder_out[:, i, :, :].device)
+
+            instance_out_compo_list = []
             if human_out is not None:
-                human_out_compo_list = human_out_compo_list[0:100]
-            interaction_decoder_out_compo_list = interaction_decoder_out_compo_list[0:100]
+                human_out_compo_list = []
+            interaction_decoder_out_compo_list = []
+            #num_HO_max = 20
             #self compo
             for j in range(num_HO[0]):
                 instance_out_1 = instance_out[:, i, indices[i][0][j], :]
@@ -346,28 +371,33 @@ class CDNHOICompo(nn.Module):
                             human_out_1 = human_out[:, i, indices[i][0][j], :]
                             human_out_compo_list.append(human_out_1.clone())
                         interaction_decoder_out_compo_list.append(interaction_decoder_out_1.clone())
-            instance_out_compo_list = instance_out_compo_list[0:200]
-            if human_out is not None:
-                human_out_compo_list = human_out_compo_list[0:200]
-            interaction_decoder_out_compo_list = interaction_decoder_out_compo_list[0:200]
+            # instance_out_compo_list = instance_out_compo_list[0:200]
+            # if human_out is not None:
+            #     human_out_compo_list = human_out_compo_list[0:200]
+            # interaction_decoder_out_compo_list = interaction_decoder_out_compo_list[0:200]
 
             if len(instance_out_compo_list):
-                instance_out_compo_1 = torch.stack(instance_out_compo_list, dim=1)
-                interaction_decoder_out_compo_1 = torch.stack(interaction_decoder_out_compo_list, dim=1)
+                self_instance_out_compo_1 = torch.stack(instance_out_compo_list, dim=1)
+                self_interaction_decoder_out_compo_1 = torch.stack(interaction_decoder_out_compo_list, dim=1)
                 if human_out is not None:
-                    human_out_compo_1 = torch.stack(human_out_compo_list, dim=1)
-                num_queries.append(interaction_decoder_out_compo_1.shape[1])
+                    self_human_out_compo_1 = torch.stack(human_out_compo_list, dim=1)
+                if self_instance_out_compo_1.shape[1] > num_HO_max:
+                    rand_indices = torch.randint(self_instance_out_compo_1.shape[1], (num_HO_max,))
+                    self_instance_out_compo_1 = self_instance_out_compo_1[:,rand_indices,:]
+                    self_interaction_decoder_out_compo_1 = self_interaction_decoder_out_compo_1[:,rand_indices,:]
+                    if human_out is not None:
+                        self_human_out_compo_1 = self_human_out_compo_1[:,rand_indices,:]
+                instance_out_compo_1 = torch.cat([cross_instance_out_compo_1,self_instance_out_compo_1],dim=1)
+                interaction_decoder_out_compo_1 = torch.cat([cross_interaction_decoder_out_compo_1, self_interaction_decoder_out_compo_1], dim=1)
+                if human_out is not None:
+                    human_out_compo_1 = torch.cat([cross_human_out_compo_1, self_human_out_compo_1], dim=1)
             else:
-                instance_out_compo_1 = torch.randn(
-                    [instance_out[:, i, :, :].shape[0], 0, instance_out[:, i, :, :].shape[2]],
-                    requires_grad=True, device=instance_out[:, i, :, :].device)
+                instance_out_compo_1 = cross_instance_out_compo_1
+                interaction_decoder_out_compo_1 = cross_interaction_decoder_out_compo_1
                 if human_out is not None:
-                    human_out_compo_1 = torch.randn([human_out[:, i, :, :].shape[0], 0, human_out[:, i, :, :].shape[2]],
-                                                    requires_grad=True, device=human_out[:, i, :, :].device)
-                interaction_decoder_out_compo_1 = torch.randn(
-                    [interaction_decoder_out[:, i, :, :].shape[0], 0, interaction_decoder_out[:, i, :, :].shape[2]],
-                    requires_grad=True, device=interaction_decoder_out[:, i, :, :].device)
-                num_queries.append(instance_out_compo_1.shape[1])
+                    human_out_compo_1 = cross_human_out_compo_1
+
+            num_queries.append(instance_out_compo_1.shape[1])
             if human_out is not None:
                 human_out_compo.append(human_out_compo_1)
             instance_out_compo.append(instance_out_compo_1)
@@ -585,11 +615,6 @@ class SetCriterionHOI(nn.Module):
 
         self.alpha = args.alpha
         self.uncertainty = args.uncertainty
-        if self.uncertainty:
-            self.w_uctt = nn.Parameter(torch.Tensor(2, num_queries*2, num_verb_classes))
-            self.c_uctt = nn.Parameter(torch.Tensor(2, num_queries*2, num_verb_classes))
-            nn.init.xavier_uniform_(self.w_uctt)
-            nn.init.xavier_uniform_(self.c_uctt)
 
         if args.dataset_file == 'hico':
             self.obj_nums_init = [1811, 9462, 2415, 7249, 1665, 3587, 1396, 1086, 10369, 800,
@@ -829,41 +854,7 @@ class SetCriterionHOI(nn.Module):
                       'loss_verb_uctt': torch.tensor(0., requires_grad=True, device=src_logits.device)}
             return losses
 
-        '''
-        idx = self._get_src_permutation_idx(indices)
-        target_classes_o = torch.cat([t['verb_labels'][J] for t, (_, J) in zip(targets, indices)])
-        target_classes = torch.zeros_like(src_logits)
-        target_classes[idx] = target_classes_o
-        # target_classes_o: [num_hois_in_batch,num_verb_classes]
-        # target_classes: [B,num_queries,num_verb_classes]
-        pos_inds = target_classes.gt(0.5)  # [B,num_queries,num_verb_classes]
-        uctt_match_list = []
-        for i in range(len(indices)):
-            uctt_match = uncertainty[i,indices[i][0],:]
-            pos_index = pos_inds[i,indices[i][0],:]
-            uctt_match = uctt_match[pos_index]
-            uctt_match_list.append(uctt_match)
-        uctt_match_batch = torch.cat(uctt_match_list)
-        if len(uctt_match_batch):
-            uctt_avg = torch.log(torch.mean(torch.exp(uctt_match_batch)))
-        else:
-            uctt_avg = torch.log(torch.mean(torch.exp(uncertainty)))
-        '''
         uctt_avg = torch.log(torch.mean(torch.exp(uncertainty)))
-
-        # src_logits = src_logits.sigmoid()*torch.exp(-uncertainty)*pos_inds
-        #loss_verb_uctt = torch.nn.functional.binary_cross_entropy_with_logits(src_logits, target_classes)
-
-        '''
-        orig_num_queries = src_logits.shape[1]
-        if self.w_uctt.shape[1] > orig_num_queries:
-            padding = torch.zeros(src_logits.shape[0], self.w_uctt.shape[1] - orig_num_queries, src_logits.shape[2]).to(src_logits.device)
-            src_logits = torch.cat((src_logits, padding), dim=1)
-            uncertainty = torch.cat((uncertainty, padding), dim=1)
-        src_logits = src_logits * torch.exp(self.w_uctt - uncertainty) + self.c_uctt
-        src_logits = src_logits[:, :orig_num_queries, :].sigmoid() * pos_inds
-        loss_verb_uctt = torch.nn.functional.binary_cross_entropy(src_logits, target_classes) * torch.exp(-uctt_avg)
-        '''
         losses = {'loss_uctt': uctt_avg,
                   'loss_verb_uctt': uctt_avg * torch.exp(2*uctt_avg)}
         return losses
@@ -873,72 +864,6 @@ class SetCriterionHOI(nn.Module):
         neg_inds = gt.lt(0.5).float()
 
         loss = 0
-        #uctt+focal25/3
-        '''
-        if uctt is not None:
-            #pred_ = (1 - uctt) * pred + uctt
-            #pos_loss = torch.log(pred_) * torch.pow(1 - pred_, 2) - 0.2 * uctt
-            pos_loss = torch.log(pred) * torch.pow(1 - pred, 2) * torch.exp(-uctt) - uctt
-            pos_loss = alpha * pos_loss * pos_inds
-        else:
-            pos_loss = alpha * torch.log(pred) * torch.pow(1 - pred, 2) * pos_inds  # [B,num_queries,num_verb_classes]
-        if weights is not None:
-            pos_loss = pos_loss * weights[:-1]
-
-        if uctt is not None:
-            #pred_ = (1 - uctt) * pred
-            #neg_loss = torch.log(1 - pred_) * torch.pow(pred_, 2) - 0.2 * uctt
-            neg_loss = torch.log(1 - pred) * torch.pow(pred, 2) * torch.exp(-uctt) - uctt
-            neg_loss = (1 - alpha) * neg_loss * neg_inds
-        else:
-            neg_loss = (1 - alpha) * torch.log(1 - pred) * torch.pow(pred, 2) * neg_inds  # [B,num_queries,num_verb_classes]
-        '''
-        '''
-        num_pos = pos_inds.float().sum()
-        num_neg = neg_inds.float().sum()
-        if uctt is not None:
-            if num_pos == 0:
-                pos_uctt = torch.log(torch.mean(torch.exp(uctt)))
-            else:
-                pos_uctt = torch.exp(uctt) * pos_inds
-                pos_uctt = pos_uctt.sum() / num_pos
-                pos_uctt = torch.log(pos_uctt)
-            pos_loss = torch.log(pred) * torch.pow(1 - pred, 2) * pos_inds
-            pos_loss = pos_loss.sum()
-            pos_loss = torch.exp(-pos_uctt) * pos_loss - pos_uctt
-            if weights is not None:
-                pos_loss = pos_loss * weights[:-1]
-
-            neg_uctt = torch.exp(uctt) * neg_inds
-            neg_uctt = neg_uctt.sum() / num_neg
-            neg_uctt = torch.log(neg_uctt)
-            neg_loss = torch.log(1 - pred) * torch.pow(pred, 2) * neg_inds
-            neg_loss = neg_loss.sum()
-            neg_loss = torch.exp(-neg_uctt) * neg_loss - neg_uctt
-            #print(num_pos,pos_loss,num_neg,neg_loss)
-
-        else:
-            pos_loss = alpha * torch.log(pred) * torch.pow(1 - pred, 2) * pos_inds  # [B,num_queries,num_verb_classes]
-            if weights is not None:
-                pos_loss = pos_loss * weights[:-1]
-
-            neg_loss = (1 - alpha) * torch.log(1 - pred) * torch.pow(pred, 2) * neg_inds  # [B,num_queries,num_verb_classes]
-            pos_loss = pos_loss.sum()
-            neg_loss = neg_loss.sum()
-        '''
-
-        #if uctt is not None:
-            #uctt+focal21
-            #pos_loss = pos_loss + 0.001 * alpha * (1 - pred) * uctt * pos_inds
-            #neg_loss = neg_loss + 0.001 * (1 - alpha) * pred * uctt * neg_inds
-
-            #uctt+focal22
-            #pos_loss = pos_loss - 0.001 * alpha * (pred - 0.75) * uctt * pos_inds
-            #neg_loss = neg_loss - 0.001 * (1 - alpha) * (0.25 - pred) * uctt * neg_inds
-
-            #uctt+focal23
-            #pos_loss = pos_loss * (1 + (pred - 0.5) * uctt * pos_inds)
-            #neg_loss = neg_loss * (1 + (0.5 - pred) * uctt * pos_inds)
 
         pos_loss = alpha * torch.log(pred) * torch.pow(1 - pred, 2) * pos_inds  # [B,num_queries,num_verb_classes]
         if weights is not None:
@@ -1092,7 +1017,7 @@ def build(args):
             args=args
         )
     else:
-        model = CDNHOI2(
+        model = CDNHOI(
             backbone,
             cdn,
             num_obj_classes=args.num_obj_classes,
@@ -1111,7 +1036,7 @@ def build(args):
     weight_dict['loss_sub_giou'] = args.giou_loss_coef
     weight_dict['loss_obj_giou'] = args.giou_loss_coef
     if args.uncertainty:
-        weight_dict['loss_verb_uctt'] = 1 #10
+        weight_dict['loss_verb_uctt'] = 2
         weight_dict['loss_uctt'] = 0
     if args.use_matching:
         weight_dict['loss_matching'] = args.matching_loss_coef
