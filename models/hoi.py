@@ -196,12 +196,19 @@ class CDNHOICompo(nn.Module):
             #                                        dropout=args.dropout, normalize_before=args.pre_norm)
             #encoder_norm = nn.LayerNorm(hidden_dim) if args.pre_norm else None
             #self.fusion_module = TransformerEncoder(encoder_layer, 1, encoder_norm)
-            decoder_layer = TransformerDecoderLayer(d_model=hidden_dim*2, nhead=args.nheads, dim_feedforward=args.dim_feedforward,
-                                                    dropout=args.dropout, normalize_before=args.pre_norm)
-            decoder_norm = nn.LayerNorm(hidden_dim*2)
-            self.fusion_module = TransformerDecoder(decoder_layer, 1, decoder_norm)
-            self.text_embedding = init_CLIP_text_embed(args)
-        self.verb_class_embed = nn.Linear(hidden_dim * 2, num_verb_classes)
+
+            # decoder_layer = TransformerDecoderLayer(d_model=hidden_dim*2, nhead=args.nheads, dim_feedforward=args.dim_feedforward,
+            #                                         dropout=args.dropout, normalize_before=args.pre_norm)
+            # decoder_norm = nn.LayerNorm(hidden_dim*2)
+            # self.fusion_module = TransformerDecoder(decoder_layer, 1, decoder_norm)
+            # self.text_embedding = init_CLIP_text_embed(args)
+
+            self.ho_proj = MLP(hidden_dim, hidden_dim, hidden_dim, 3)
+            #self.i_proj = MLP(hidden_dim, hidden_dim, hidden_dim, 3)
+        self.verb_class_embed = nn.Linear(hidden_dim, num_verb_classes)
+        # verb_embedding = init_CLIP_text_verb(args)
+        # self.verb_class_embed.weight.data = verb_embedding
+
         self.sub_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         self.obj_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
@@ -216,9 +223,11 @@ class CDNHOICompo(nn.Module):
         self.recouple = args.recouple
         self.separate = args.separate
         if self.uncertainty:
-            self.uctt = MLP_UCTT(hidden_dim * 2, hidden_dim * 2, num_verb_classes, 1, num_queries)
+            self.uctt = MLP_UCTT(hidden_dim, hidden_dim, num_verb_classes, 1, num_queries)
+        # self.w_instance = nn.Parameter(torch.tensor([0.5]))
+        # self.w_interaction = nn.Parameter(torch.tensor([0.5]))
 
-    def forward(self, samples):
+    def forward(self, samples, target, matcher):
         # hopd_outs = []
         # interaction_decoder_outs = []
         #outs = []
@@ -229,6 +238,7 @@ class CDNHOICompo(nn.Module):
             src, mask = features[-1].decompose()
             # src:[B,2048,15,20],mask:[B,15,20]
             assert mask is not None
+            human_out, obj_out = None, None
             if self.separate:
                 if self.recouple:
                     human_out, obj_out, interaction_decoder_out, interaction_decoder_out_compo= self.transformer(
@@ -241,7 +251,7 @@ class CDNHOICompo(nn.Module):
                     hopd_out, interaction_decoder_out, interaction_decoder_out_compo = self.transformer(self.input_proj(src), mask,
                                                                          self.query_embed.weight, pos[-1])
                 else:
-                    hopd_out, interaction_decoder_out = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[:2]
+                    hopd_out, interaction_decoder_out, memory = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])
             # hopd_outs.append(hopd_out)
             # interaction_decoder_outs.append(interaction_decoder_out)
 
@@ -251,7 +261,6 @@ class CDNHOICompo(nn.Module):
                 outputs_obj_class = self.obj_class_embed(obj_out)
                 if self.use_matching:
                     outputs_matching = self.matching_embed(obj_out)
-                obj_verb_rep = torch.cat((obj_out, interaction_decoder_out), 3)
             else:
                 # self.input_proj(src):[B,256,15,20]
                 # hopd_out, interaction_decoder_out:[num_decoder_layers(3),B,num_queries(100),hidden_dim(256)]
@@ -260,28 +269,29 @@ class CDNHOICompo(nn.Module):
                 outputs_obj_class = self.obj_class_embed(hopd_out)  # [num_decoder_layers(3),B,num_queries(100),num_obj_classes+1(82)]
                 if self.use_matching:
                     outputs_matching = self.matching_embed(hopd_out)
-                obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
             if self.fusion_mode:
-                #obj_verb_rep = self.fusion_module(obj_verb_rep)
-                obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
-                obj_verb_rep_fu = []
-                for m in range(obj_verb_rep.shape[0]):
-                    #obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :]))
-                    obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :], self.text_embedding))
-                obj_verb_rep = torch.stack(obj_verb_rep_fu)
-                obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
+                # #obj_verb_rep = self.fusion_module(obj_verb_rep)
+                # obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
+                # obj_verb_rep_fu = []
+                # for m in range(obj_verb_rep.shape[0]):
+                #     #obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :]))
+                #     obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :], self.text_embedding))
+                # obj_verb_rep = torch.stack(obj_verb_rep_fu)
+                # obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
+
+                hopd_out = self.ho_proj(hopd_out)
 
                 # tgt.shape: torch.Size([num_queries, bs, hidden_dim])
                 # memory.shape: torch.Size([h*w, bs, hidden_dim])
-            outputs_verb_class = self.verb_class_embed(obj_verb_rep)
+            outputs_verb_class = self.verb_class_embed(interaction_decoder_out)
             # [num_decoder_layers(3),B,num_queries(100),num_verb_classes(29)]
             out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
                    'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
             uctt_verb = None
             if self.uncertainty:
                 uctt_verb = []
-                for i in range(obj_verb_rep.shape[0]):
-                    uctt_i = self.uctt(obj_verb_rep[i])
+                for i in range(interaction_decoder_out.shape[0]):
+                    uctt_i = self.uctt(interaction_decoder_out[i])
                     uctt_verb.append(uctt_i)
                 uctt_verb = torch.stack(uctt_verb)
                 out['uctt_verb'] = uctt_verb[-1]
@@ -296,15 +306,16 @@ class CDNHOICompo(nn.Module):
                     out['aux_outputs'] = self._set_aux_loss(outputs_obj_class, outputs_verb_class,
                                                             outputs_sub_coord, outputs_obj_coord,
                                                             outputs_verb_uctt=uctt_verb)
-            if self.separate:
-                return out, human_out, obj_out, interaction_decoder_out
-            else:
-                return out, hopd_out, interaction_decoder_out
-            #outs.append(out)
+            output_without_aux = {k: v for k, v in out.items() if k != 'aux_outputs'}
+            indices = matcher(output_without_aux, target)
+            output_compo = self.forward_compo(human_out, obj_out, hopd_out, interaction_decoder_out, indices,
+                                                      memory, samples)
+
+            return out, output_compo
         else:
             return self.forward_eval(samples)
 
-    def forward_compo(self, human_out, obj_out, hopd_out, interaction_decoder_out, indices):
+    def forward_compo(self, human_out, obj_out, hopd_out, interaction_decoder_out, indices, memory, samples):
         # indices: [(tensor([27, 37]), tensor([1, 0])), (tensor([95]), tensor([0]))] (num_hois * index_of_matched_query),(num_hois * index_of_gt)
         instance_out_compo = []
         human_out_compo = []
@@ -417,17 +428,18 @@ class CDNHOICompo(nn.Module):
         if human_out is not None:
             human_out_compo = torch.stack(human_out_compo, dim=1)
 
-        obj_verb_rep_compo = torch.cat((instance_out_compo, interaction_decoder_out_compo), dim=3)
         if self.fusion_mode:
-            # obj_verb_rep = self.fusion_module(obj_verb_rep_compo)
-            obj_verb_rep_compo = obj_verb_rep_compo.permute(0, 2, 1, 3)
-            #rep_mask = torch.ones(obj_verb_rep_compo.shape[2], obj_verb_rep_compo.shape[1]).bool().to(obj_verb_rep_compo.device)
-            obj_verb_rep_compo_fu = []
-            for m in range(obj_verb_rep_compo.shape[0]):
-                #obj_verb_rep_compo_fu.append(self.fusion_module(obj_verb_rep_compo[m, :, :, :]))
-                obj_verb_rep_compo_fu.append(self.fusion_module(obj_verb_rep_compo[m, :, :, :], self.text_embedding))
-            obj_verb_rep_compo = torch.stack(obj_verb_rep_compo_fu)
-            obj_verb_rep_compo = obj_verb_rep_compo.permute(0, 2, 1, 3)
+            # # obj_verb_rep = self.fusion_module(obj_verb_rep_compo)
+            # obj_verb_rep_compo = obj_verb_rep_compo.permute(0, 2, 1, 3)
+            # #rep_mask = torch.ones(obj_verb_rep_compo.shape[2], obj_verb_rep_compo.shape[1]).bool().to(obj_verb_rep_compo.device)
+            # obj_verb_rep_compo_fu = []
+            # for m in range(obj_verb_rep_compo.shape[0]):
+            #     #obj_verb_rep_compo_fu.append(self.fusion_module(obj_verb_rep_compo[m, :, :, :]))
+            #     obj_verb_rep_compo_fu.append(self.fusion_module(obj_verb_rep_compo[m, :, :, :], self.text_embedding))
+            # obj_verb_rep_compo = torch.stack(obj_verb_rep_compo_fu)
+            # obj_verb_rep_compo = obj_verb_rep_compo.permute(0, 2, 1, 3)
+            instance_out_compo = self.ho_proj(instance_out_compo)
+            #obj_verb_rep_compo = torch.cat((instance_out_compo, interaction_decoder_out_compo), dim=3)
         if human_out is None:
             outputs_sub_coord = self.sub_bbox_embed(instance_out_compo).sigmoid()  # [num_decoder_layers(3),B,num_queries(100),4]
         else:
@@ -437,15 +449,32 @@ class CDNHOICompo(nn.Module):
             instance_out_compo)  # [num_decoder_layers(3),B,num_queries(100),num_obj_classes+1(82)]
         if self.use_matching:
             outputs_matching = self.matching_embed(instance_out_compo)
-        outputs_verb_class = self.verb_class_embed(obj_verb_rep_compo)
+        sample = samples[0]
+        features, pos = self.backbone(sample)
+        # pos:[B,hidden_dim(256),15,20]
+        src, mask = features[-1].decompose()
+        # src:[B,2048,15,20],mask:[B,15,20]
+        assert mask is not None
+        pos_embed = pos[-1].flatten(2).permute(2, 0, 1)
+        mask = mask.flatten(1)
+        interaction_query_embed = 0.5 * torch.flip(instance_out_compo[-1], dims=[0]) + 0.5 * \
+                                  interaction_decoder_out_compo[-1]
+        interaction_query_embed = interaction_query_embed.transpose(0, 1)
+        interaction_tgt = torch.zeros_like(interaction_query_embed)
+        memory = torch.mean(memory, dim=1).unsqueeze(1).repeat(1, 2, 1)
+        interaction_decoder_out_compo = self.transformer.interaction_decoder(interaction_tgt, memory, memory_key_padding_mask=mask,
+                                                           pos=pos_embed, query_pos=interaction_query_embed)
+        interaction_decoder_out_compo = interaction_decoder_out_compo.transpose(1, 2)
+        interaction_decoder_out_compo = torch.flip(interaction_decoder_out_compo, dims=[0])
+        outputs_verb_class = self.verb_class_embed(interaction_decoder_out_compo)
         # [num_decoder_layers(3),B,num_queries(100),num_verb_classes(29)]
         out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
         uctt_verb = None
         if self.uncertainty:
             uctt_verb = []
-            for i in range(obj_verb_rep_compo.shape[0]):
-                uctt_i = self.uctt(obj_verb_rep_compo[i])
+            for i in range(interaction_decoder_out_compo.shape[0]):
+                uctt_i = self.uctt(interaction_decoder_out_compo[i])
                 uctt_verb.append(uctt_i)
             uctt_verb = torch.stack(uctt_verb)
             out['uctt_verb'] = uctt_verb[-1]
@@ -487,17 +516,17 @@ class CDNHOICompo(nn.Module):
                 hopd_out)  # [num_decoder_layers(3),B,num_queries(100),num_obj_classes+1(82)]
             if self.use_matching:
                 outputs_matching = self.matching_embed(hopd_out)
-            obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
         if self.fusion_mode:
-            # obj_verb_rep = self.fusion_module(obj_verb_rep)
-            obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
-            obj_verb_rep_fu = []
-            for m in range(obj_verb_rep.shape[0]):
-                #obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :]))
-                obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :], self.text_embedding))
-            obj_verb_rep = torch.stack(obj_verb_rep_fu)
-            obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
-        outputs_verb_class = self.verb_class_embed(obj_verb_rep)
+            # # obj_verb_rep = self.fusion_module(obj_verb_rep)
+            # obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
+            # obj_verb_rep_fu = []
+            # for m in range(obj_verb_rep.shape[0]):
+            #     #obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :]))
+            #     obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :], self.text_embedding))
+            # obj_verb_rep = torch.stack(obj_verb_rep_fu)
+            # obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
+            hopd_out = self.ho_proj(hopd_out)
+        outputs_verb_class = self.verb_class_embed(interaction_decoder_out)
         # [C(3),B,num_queries(100),num_verb_classes(29)]
         out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
@@ -573,7 +602,7 @@ class MLP_UCTT(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers, num_queries):
         super().__init__()
         self.num_layers = num_layers
-        self.num_queries = 200
+        self.num_queries = 100
         h = [hidden_dim] * (num_layers - 1)
         self.layers = nn.ModuleList()
         for i, dims in enumerate(zip([input_dim] + h, h + [hidden_dim])):
@@ -582,8 +611,8 @@ class MLP_UCTT(nn.Module):
             if i < num_layers - 1:
                 self.layers.append(nn.ReLU())
             else:
+                #self.layers.append(nn.Dropout(0.1))
                 self.layers.append(nn.Linear(hidden_dim, output_dim))
-                #self.layers.append(nn.ReLU())
 
     def forward(self, x):
         orig_num_queries = x.shape[1]
@@ -591,7 +620,6 @@ class MLP_UCTT(nn.Module):
             padding = torch.zeros(x.shape[0],self.num_queries-orig_num_queries,x.shape[2]).to(x.device)
             x = torch.cat((x,padding),dim=1)
         for i, layer in enumerate(self.layers):
-            #print(x.shape)
             x = layer(x)
         x = x[:,:orig_num_queries,:]
         return x

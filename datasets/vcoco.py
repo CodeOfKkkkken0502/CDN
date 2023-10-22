@@ -29,6 +29,11 @@ class VCOCO(torch.utils.data.Dataset):
                                72, 73, 74, 75, 76, 77, 78, 79, 80, 81,
                                82, 84, 85, 86, 87, 88, 89, 90)
         self._valid_verb_ids = range(29)
+        with open('data/v-coco/indices_superclass_vcoco_c.json', 'r') as f:
+            self.superclasses = json.load(f)
+        with open('data/v-coco/weights_sample_vcoco.json', 'r') as f:
+            self.weights_sample = json.load(f)
+            self.weights_sample = [w**0.25 for w in self.weights_sample]
 
     def __len__(self):
         return len(self.annotations)

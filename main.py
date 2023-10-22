@@ -214,28 +214,73 @@ def main(args):
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
     if args.compo:
-        dataset_train_sub1, dataset_train_sub2 = torch.utils.data.random_split(dataset_train, [int(len(dataset_train)/2), len(dataset_train)-int(len(dataset_train)/2)])
-        if args.distributed:
-            sampler_train_sub1 = DistributedSampler(dataset_train_sub1)
-            sampler_train_sub2 = DistributedSampler(dataset_train_sub2)
-            sampler_val = DistributedSampler(dataset_val, shuffle=False)
-        else:
-            sampler_train_sub1 = torch.utils.data.RandomSampler(dataset_train_sub1)
-            sampler_train_sub2 = torch.utils.data.RandomSampler(dataset_train_sub2)
-            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-        batch_sampler_train_sub1 = torch.utils.data.BatchSampler(sampler_train_sub1, batch_size=int(args.batch_size/2), drop_last=True)
-        batch_sampler_train_sub2 = torch.utils.data.BatchSampler(sampler_train_sub2, batch_size=int(args.batch_size/2), drop_last=True)
-        data_loader_train_sub1 = DataLoader(dataset_train_sub1, batch_sampler=batch_sampler_train_sub1,
-                                       collate_fn=utils.collate_fn, num_workers=args.num_workers)
-        data_loader_train_sub2 = DataLoader(dataset_train_sub2, batch_sampler=batch_sampler_train_sub2,
-                                       collate_fn=utils.collate_fn, num_workers=args.num_workers)
-        data_loader_train = [data_loader_train_sub1, data_loader_train_sub2]
+        length = 0
+        dataset_subsets = []
+        sampler_subsets = []
+        batch_sampler_subsets = []
+        data_loader_train = []
+        for idx_sub in dataset_train.superclasses:
+            dataset_sub = torch.utils.data.Subset(dataset_train, idx_sub)
+            dataset_subsets.append(dataset_sub)
+            if args.distributed:
+                # print('w')
+                # weights_sub = [dataset_train.weights_sample[w] for w in idx_sub]
+                # sampler_weighted = torch.utils.data.WeightedRandomSampler(weights_sub, len(dataset_sub))
+                # sampler_sub = utils.DistributedSamplerWrapper(sampler_weighted)
+                sampler_sub = DistributedSampler(dataset_sub)
+                sampler_subsets.append(sampler_sub)
+                sampler_val = DistributedSampler(dataset_val, shuffle=False)
+            else:
+                sampler_sub = torch.utils.data.RandomSampler(dataset_sub)
+                sampler_subsets.append(sampler_sub)
+                sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+            batch_sampler_sub = torch.utils.data.BatchSampler(sampler_sub, batch_size=args.batch_size, drop_last=True)
+            batch_sampler_subsets.append(batch_sampler_sub)
+            data_loader_sub = DataLoader(dataset_sub, batch_sampler=batch_sampler_sub,
+                                         collate_fn=utils.collate_fn, num_workers=args.num_workers)
+            data_loader_train.append(data_loader_sub)
+            length += len(data_loader_sub)
+
+        # dataset_train_sub1, dataset_train_sub2 = torch.utils.data.random_split(dataset_train, [int(len(dataset_train)/2), len(dataset_train)-int(len(dataset_train)/2)])
+        # length = len(dataset_train_sub1)
+        # # weights_sub1, weights_sub2 = [], []
+        # # for i in dataset_train_sub1.indices:
+        # #     weights_sub1.append(dataset_train.weights_sample[i])
+        # # for i in dataset_train_sub2.indices:
+        # #     weights_sub2.append(dataset_train.weights_sample[i])
+        # if args.distributed:
+        #     print('1')
+        # #     sampler_weighted1 = torch.utils.data.WeightedRandomSampler(weights_sub1, len(dataset_train_sub1))
+        # #     sampler_weighted2 = torch.utils.data.WeightedRandomSampler(weights_sub2, len(dataset_train_sub2))
+        # #     sampler_train_sub1 = utils.DistributedSamplerWrapper(sampler_weighted1)
+        # #     sampler_train_sub2 = utils.DistributedSamplerWrapper(sampler_weighted2)
+        #     sampler_train_sub1 = DistributedSampler(dataset_train_sub1)
+        #     sampler_train_sub2 = DistributedSampler(dataset_train_sub2)
+        #     sampler_val = DistributedSampler(dataset_val, shuffle=False)
+        # else:
+        #     # sampler_train_sub1 = torch.utils.data.WeightedRandomSampler(weights_sub1, len(dataset_train_sub1))
+        #     # sampler_train_sub2 = torch.utils.data.WeightedRandomSampler(weights_sub2, len(dataset_train_sub2))
+        #     sampler_train_sub1 = torch.utils.data.RandomSampler(dataset_train_sub1)
+        #     sampler_train_sub2 = torch.utils.data.RandomSampler(dataset_train_sub2)
+        #     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        # batch_sampler_train_sub1 = torch.utils.data.BatchSampler(sampler_train_sub1, batch_size=int(args.batch_size/2), drop_last=True)
+        # batch_sampler_train_sub2 = torch.utils.data.BatchSampler(sampler_train_sub2, batch_size=int(args.batch_size/2), drop_last=True)
+        # data_loader_train_sub1 = DataLoader(dataset_train_sub1, batch_sampler=batch_sampler_train_sub1,
+        #                                collate_fn=utils.collate_fn, num_workers=args.num_workers)
+        # data_loader_train_sub2 = DataLoader(dataset_train_sub2, batch_sampler=batch_sampler_train_sub2,
+        #                                collate_fn=utils.collate_fn, num_workers=args.num_workers)
+        # data_loader_train = [data_loader_train_sub1, data_loader_train_sub2]
     else:
         if args.distributed:
+            # print('1')
+            # sampler_weighted = torch.utils.data.WeightedRandomSampler(dataset_train.weights_sample,
+            #                                                           len(dataset_train.weights_sample))
+            # sampler_train = utils.DistributedSamplerWrapper(sampler_weighted)
             sampler_train = DistributedSampler(dataset_train)
             sampler_val = DistributedSampler(dataset_val, shuffle=False)
         else:
-            sampler_train = torch.utils.data.RandomSampler(dataset_train)
+            sampler_train = torch.utils.data.WeightedRandomSampler(dataset_train.weights_sample, len(dataset_train.weights_sample))
+            # sampler_train = torch.utils.data.RandomSampler(dataset_train)
             sampler_val = torch.utils.data.SequentialSampler(dataset_val)
         batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, args.batch_size, drop_last=True)
         data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
@@ -283,8 +328,10 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             if args.compo:
-                sampler_train_sub1.set_epoch(epoch)
-                sampler_train_sub2.set_epoch(epoch)
+                # sampler_train_sub1.set_epoch(epoch)
+                # sampler_train_sub2.set_epoch(epoch)
+                for sampler_sub in sampler_subsets:
+                    sampler_sub.set_epoch(epoch)
             else:
                 sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
