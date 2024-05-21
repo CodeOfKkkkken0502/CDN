@@ -1,12 +1,13 @@
-# CDN
-Code for our NeurIPS 2021 paper "[Mining the Benefits of Two-stage and One-stage HOI Detection](https://arxiv.org/pdf/2108.05077.pdf)".
+# Compositional Learning in Transformer-Based Human-Object Interaction Detection (ICME 2023)
+Code for our ICME 2023 paper "[Compositional Learning in Transformer-Based Human-Object Interaction Detection](https://ieeexplore.ieee.org/document/10219754)".
 
-Contributed by Aixi Zhang*, [Yue Liao*](https://liaoyue.net/), [Si Liu](http://colalab.org/people), Miao Lu, Yongliang Wang, Chen Gao and Xiaobo Li.
+Developed based on code for "[Mining the Benefits of Two-stage and One-stage HOI Detection](https://arxiv.org/pdf/2108.05077.pdf)" original by Aixi Zhang*, [Yue Liao*](https://liaoyue.net/), [Si Liu](http://colalab.org/people), Miao Lu, Yongliang Wang, Chen Gao and Xiaobo Li.
 
-![](paper_images/framework.png)
+Contributed by Zikun Zhuang*, Ruihao Qian, Chi Xie and Shuang Liang.
+![](overview.jpg)
 
 ## Installation
-Installl the dependencies.
+Install the dependencies.
 ```
 pip install -r requirements.txt
 ```
@@ -61,8 +62,8 @@ V-COCO annotations with the HOIA format, `corre_vcoco.npy`, `test_vcoco.json`, a
 
 
 
-## Pre-trained model
-Download the pretrained model of DETR detector for [ResNet50](https://dl.fbaipublicfiles.com/detr/detr-r50-e632da11.pth), and put it to the `params` directory.
+## Pre-trained DETR parameters
+Download the pretrained parameters of DETR detector for [ResNet50](https://dl.fbaipublicfiles.com/detr/detr-r50-e632da11.pth), and put it to the `params` directory.
 ```
 python convert_parameters.py \
         --load_path params/detr-r50-e632da11.pth \
@@ -76,7 +77,7 @@ python convert_parameters.py \
 ```
 
 ## Training
-After the preparation, you can start training with the following commands. The whole training is split into two steps: CDN base model training and dynamic re-weighting training. The trainings of CDN-S for HICO-DET and V-COCO are shown as follows.
+After the preparation, you can start training with the following commands. The whole training is split into two steps: base model training and dynamic re-weighting training. The trainings of our model based on CDN-S for HICO-DET and V-COCO are shown as follows.
 
 ### HICO-DET
 ```
@@ -96,7 +97,10 @@ python -m torch.distributed.launch \
         --dec_layers_interaction 3 \
         --epochs 90 \
         --lr_drop 60 \
-        --use_nms_filter
+        --use_nms_filter \
+        --compo \
+        --remove \
+        --batch_weight_mode 1
 
 python -m torch.distributed.launch \
         --nproc_per_node=8 \
@@ -118,7 +122,10 @@ python -m torch.distributed.launch \
         --verb_reweight \
         --lr 1e-5 \
         --lr_backbone 1e-6 \
-        --use_nms_filter
+        --use_nms_filter \
+        --compo \
+        --remove \
+        --batch_weight_mode 1
 ```
 
 ### V-COCO
@@ -139,7 +146,10 @@ python -m torch.distributed.launch \
         --dec_layers_interaction 3 \
         --epochs 90 \
         --lr_drop 60 \
-        --use_nms_filter
+        --use_nms_filter \
+        --compo \
+        --remove \
+        --batch_weight_mode 2
 
 python -m torch.distributed.launch \
         --nproc_per_node=8 \
@@ -160,7 +170,10 @@ python -m torch.distributed.launch \
         --verb_reweight \
         --lr 1e-5 \
         --lr_backbone 1e-6 \
-        --use_nms_filter
+        --use_nms_filter \
+        --compo \
+        --remove \
+        --batch_weight_mode 2
 ```
 
 ## Evaluation
@@ -216,39 +229,17 @@ python vsrl_eval.py vcoco.pickle
 
 ```
 
-
-## Results
-
-### HICO-DET
-||Full (D)|Rare (D)|Non-rare (D)|Full(KO)|Rare (KO)|Non-rare (KO)|Download|
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-|CDN-S (R50)| 31.44 | 27.39 | 32.64 | 34.09 | 29.63 | 35.42 | [model](https://drive.google.com/file/d/1-GuJ4FGTGJAktH2NVR6Qp_N0zimg7uRr/view?usp=sharing) |
-|CDN-B (R50)| 31.78 | 27.55 | 33.05 | 34.53 | 29.73 | 35.96 | [model](https://drive.google.com/file/d/1oGT_oGR_QiJuLqCcfGTTAh9v-wj2DhGL/view?usp=sharing) |
-|CDN-L (R101)| 32.07 | 27.19 | 33.53 | 34.79 | 29.48 | 36.38 | [model](https://drive.google.com/file/d/1SHR2wD4WIte5k1PkaHKg4hCVlu316oOw/view?usp=sharing) |
-
-D: Default, KO: Known object
-
-### V-COCO
-|| Scenario 1 | Scenario 2 | Download | 
-| :--- | :---: | :---: | :---: |
-|CDN-S (R50)| 61.68 | 63.77 | [model](https://drive.google.com/file/d/1qI-tZwSry4ZipkO05PMeZVkCi-IOMSDZ/view?usp=sharing) |
-|CDN-B (R50)| 62.29 | 64.42 | [model](https://drive.google.com/file/d/1lUGoIfqcizLyukYJwKm83CduWKQnuWc8/view?usp=sharing) |
-|CDN-L (R101)| 63.91 | 65.89 | [model](https://drive.google.com/file/d/1EAOMRr5ArQNKZm1fyQqC81EoOediV3rT/view?usp=sharing) |
-
 ## Citation
 Please consider citing our paper if it helps your research.
 ```
-@article{zhang2021mining,
-  title={Mining the Benefits of Two-stage and One-stage HOI Detection},
-  author={Zhang, Aixi and Liao, Yue and Liu, Si and Lu, Miao and Wang, Yongliang and Gao, Chen and Li, Xiaobo},
-  journal={arXiv preprint arXiv:2108.05077},
-  year={2021}
-}
+@INPROCEEDINGS{10219754,
+  author={Zhuang, Zikun and Qian, Ruihao and Xie, Chi and Liang, Shuang},
+  booktitle={2023 IEEE International Conference on Multimedia and Expo (ICME)}, 
+  title={Compositional Learning in Transformer-Based Human-Object Interaction Detection}, 
+  year={2023},
+  volume={},
+  number={},
+  pages={1038-1043},
+  doi={10.1109/ICME55011.2023.00182}}
 ```
-
-## License
-CDN is released under the Apache 2.0 license. See [LICENSE](LICENSE) for additional details.
-
-## Acknowledge
-Some of the codes are built upon [PPDM](https://github.com/YueLiao/PPDM), [DETR](https://github.com/facebookresearch/detr) and [QPIC](https://github.com/hitachi-rd-cv/qpic). Thanks them for their great works!
 
