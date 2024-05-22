@@ -25,7 +25,7 @@ from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
 from models.hoi import CDNHOICompo, CDNHOI, CDNHOI2
 
 
-class CDNHOI(nn.Module):
+class CDNHOI_(nn.Module):
     def __init__(self, backbone, transformer, num_obj_classes, num_verb_classes, num_queries, aux_loss=False, args=None):
         super().__init__()
         self.num_queries = num_queries
@@ -297,6 +297,11 @@ def get_args_parser():
     parser.add_argument('--separate', action='store_true', help='Separate decoders for human, object and interaction')
     parser.add_argument('--zero_shot_type', default='default', help='Zero-shot type')
     parser.add_argument('--clip_model', default='ViT-B/32', help='clip pretrained model path')
+    parser.add_argument('--clip_visual', action='store_true',
+                        help='use clip visual features to guide interaction features')
+    parser.add_argument('--superclass', action='store_true', help='use superclass-based sampling strategy')
+    parser.add_argument('--compo_new', action='store_true',
+                        help='use interaction decoder to re-compose interaction features')
 
     return parser
 
@@ -334,14 +339,24 @@ def main(args):
     args.masks = False
     backbone = build_backbone(args)
     cdn = build_cdn(args)
-    model = CDNHOI(
-        backbone,
-        cdn,
-        num_obj_classes=len(valid_obj_ids) + 1,
-        num_verb_classes=len(verb_classes),
-        num_queries=args.num_queries,
-        args=args
-    )
+    if args.compo:
+        model = CDNHOICompo(
+            backbone,
+            cdn,
+            num_obj_classes=len(valid_obj_ids) + 1,
+            num_verb_classes=len(verb_classes),
+            num_queries=args.num_queries,
+            args=args
+        )
+    else:
+        model = CDNHOI(
+            backbone,
+            cdn,
+            num_obj_classes=len(valid_obj_ids) + 1,
+            num_verb_classes=len(verb_classes),
+            num_queries=args.num_queries,
+            args=args
+        )
 
     post_processor = PostProcessHOI(args.num_queries, args.subject_category_id, dataset_val.correct_mat, args)
     model.to(device)
@@ -350,24 +365,27 @@ def main(args):
     checkpoint = torch.load(args.param_path, map_location='cpu')
     model.load_state_dict(checkpoint['model'])
 
-    detections = generate(model, post_processor, data_loader_val, device, verb_classes, args.missing_category_id)
+    detections = generate(model, post_processor, data_loader_val, device, verb_classes, args.missing_category_id, args.compo)
 
     with open(args.save_path, 'wb') as f:
         pickle.dump(detections, f, protocol=2)
 
 
 @torch.no_grad()
-def generate(model, post_processor, data_loader, device, verb_classes, missing_category_id):
+def generate(model, post_processor, data_loader, device, verb_classes, missing_category_id, compo):
     model.eval()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Generate:'
 
     detections = []
-    for samples, targets in metric_logger.log_every(data_loader, 10, header):
+    for samples, targets in metric_logger.log_every(data_loader, 500, header):
         samples = samples.to(device)
 
-        outputs = model(samples)
+        if compo:
+            outputs = model.forward_eval(samples)
+        else:
+            outputs = model(samples)
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = post_processor(outputs, orig_target_sizes)
 
