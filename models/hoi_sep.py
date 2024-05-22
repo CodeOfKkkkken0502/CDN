@@ -271,6 +271,9 @@ class CDNHOICompo(nn.Module):
             self.uctt = MLP_UCTT(hidden_dim, hidden_dim, 1, 1, num_queries)
 
     def forward(self, samples, target, matcher):
+        # hopd_outs = []
+        # interaction_decoder_outs = []
+        #outs = []
         if isinstance(samples, list):
             sample = samples[0]
             features, pos = self.backbone(sample)
@@ -292,6 +295,8 @@ class CDNHOICompo(nn.Module):
                                                                          self.query_embed.weight, pos[-1])
                 else:
                     hopd_out, interaction_decoder_out, memory = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])
+            # hopd_outs.append(hopd_out)
+            # interaction_decoder_outs.append(interaction_decoder_out)
 
             if self.separate:
                 outputs_sub_coord = self.sub_bbox_embed(human_out).sigmoid()
@@ -308,8 +313,19 @@ class CDNHOICompo(nn.Module):
                 if self.use_matching:
                     outputs_matching = self.matching_embed(hopd_out)
             if self.fusion_mode:
+                # #obj_verb_rep = self.fusion_module(obj_verb_rep)
+                # obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
+                # obj_verb_rep_fu = []
+                # for m in range(obj_verb_rep.shape[0]):
+                #     #obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :]))
+                #     obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :], self.text_embedding))
+                # obj_verb_rep = torch.stack(obj_verb_rep_fu)
+                # obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
+
                 hopd_out = self.ho_proj(hopd_out)
 
+                # tgt.shape: torch.Size([num_queries, bs, hidden_dim])
+                # memory.shape: torch.Size([h*w, bs, hidden_dim])
             obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
             if self.compo_new:
                 outputs_verb_class = self.verb_class_embed(interaction_decoder_out)
@@ -360,8 +376,10 @@ class CDNHOICompo(nn.Module):
         for i in range(half_bs * 2):
             index = half_bs + i if i < half_bs else i - half_bs
             num_HO = (len(indices[i][0]), len(indices[index][0]))
+
             # cross compo
             if 0 not in num_HO:
+                # print(indices[index][0])
                 cross_instance_out_compo_1 = instance_out[:, i, indices[i][0], :].repeat_interleave(len(indices[index][0]), dim=1)
                 cross_interaction_decoder_out_compo_1 = interaction_decoder_out[:, index, indices[index][0], :].repeat(1, len(indices[i][0]), 1)
                 if human_out is not None:
@@ -383,7 +401,6 @@ class CDNHOICompo(nn.Module):
                     [interaction_decoder_out[:, i, :, :].shape[0], 0, interaction_decoder_out[:, i, :, :].shape[2]],
                     requires_grad=True, device=interaction_decoder_out[:, i, :, :].device)
 
-            #self compo
             if num_HO[1] > 1:
                 remove_idx = [i*num_HO[1]+i for i in range(num_HO[1])]
                 keep_idx = []
@@ -479,6 +496,7 @@ class CDNHOICompo(nn.Module):
         out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1], 'intd_out': obj_verb_rep_compo[-1], 'is_compo': True}
         uctt_verb = None
+
         if self.uncertainty:
             uctt_verb = self.uctt(interaction_decoder_out_compo)
             out['uctt_verb'] = uctt_verb[-1]
@@ -521,14 +539,6 @@ class CDNHOICompo(nn.Module):
             if self.use_matching:
                 outputs_matching = self.matching_embed(hopd_out)
         if self.fusion_mode:
-            # # obj_verb_rep = self.fusion_module(obj_verb_rep)
-            # obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
-            # obj_verb_rep_fu = []
-            # for m in range(obj_verb_rep.shape[0]):
-            #     #obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :]))
-            #     obj_verb_rep_fu.append(self.fusion_module(obj_verb_rep[m, :, :, :], self.text_embedding))
-            # obj_verb_rep = torch.stack(obj_verb_rep_fu)
-            # obj_verb_rep = obj_verb_rep.permute(0, 2, 1, 3)
             hopd_out = self.ho_proj(hopd_out)
         obj_verb_rep = torch.cat((hopd_out, interaction_decoder_out), 3)
         if self.compo_new:
@@ -742,9 +752,9 @@ class SetCriterionHOI(nn.Module):
         assert 'pred_obj_logits' in outputs
         src_logits = outputs['pred_obj_logits']  #[B,num_queries,num_obj_classes]
         if not src_logits.shape[1]:
-            losses = {'loss_obj_ce': torch.tensor(0., requires_grad=True, device=src_logits.device)}
+            losses = {'loss_obj_ce': torch.tensor([0., 0.], requires_grad=True, device=src_logits.device)}
             if log:
-                losses['obj_class_error'] = torch.tensor(0., requires_grad=True, device=src_logits.device)
+                losses['obj_class_error'] = torch.tensor([0., 0.], requires_grad=True, device=src_logits.device)
             return losses
 
         idx = self._get_src_permutation_idx(indices)
@@ -775,7 +785,10 @@ class SetCriterionHOI(nn.Module):
             aphal = min(math.pow(0.999, self.q_obj.qsize()),0.9)
             obj_weights = aphal * self.obj_weights_init + (1 - aphal) * obj_weights
 
-        loss_obj_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, obj_weights)  #transpose:[B,num_obj_classes,num_queries]
+        loss_obj_ce = []
+        for i in range(target_classes.shape[0]):
+            loss_obj_ce.append(F.cross_entropy(src_logits.transpose(1, 2)[i].unsqueeze(0), target_classes[i].unsqueeze(0), obj_weights))  #transpose:[B,num_obj_classes,num_queries]
+        loss_obj_ce = torch.stack(loss_obj_ce)
         losses = {'loss_obj_ce': loss_obj_ce}
 
         if log:
@@ -799,9 +812,9 @@ class SetCriterionHOI(nn.Module):
         assert 'pred_verb_logits' in outputs
         src_logits = outputs['pred_verb_logits']  # [B,num_queries,num_verb_classes]
         if not src_logits.shape[1]:
-            losses = {'loss_verb_ce': torch.tensor(0., requires_grad=True, device=src_logits.device)}
+            losses = {'loss_verb_ce': torch.tensor([0., 0.], requires_grad=True, device=src_logits.device)}
             if self.clip_visual:
-                losses['loss_verb_embed'] = torch.tensor(0., requires_grad=True, device=src_logits.device)
+                losses['loss_verb_embed'] = torch.tensor([0., 0.], requires_grad=True, device=src_logits.device)
             return losses
         uncertainty = None
         if 'uctt_verb' in outputs:
@@ -837,16 +850,18 @@ class SetCriterionHOI(nn.Module):
             aphal = min(math.pow(0.999, self.q_verb.qsize()),0.9)
             verb_weights = aphal * self.verb_weights_init + (1 - aphal) * verb_weights
 
-
         src_logits_ = src_logits.sigmoid()
-        loss_verb_ce = self._neg_loss(src_logits_, target_classes, uncertainty, weights=verb_weights, alpha=self.alpha)
+        loss_verb_ce = []
+        for i in range(target_classes.shape[0]):
+            loss_verb_ce.append(
+                self._neg_loss(src_logits_, target_classes, uncertainty, weights=verb_weights, alpha=self.alpha))
+        loss_verb_ce = torch.stack(loss_verb_ce)
         losses = {'loss_verb_ce': loss_verb_ce}
 
         if self.clip_visual:
             losses['loss_verb_embed'] = self.loss_clip_visual_vb(outputs, target_classes_o, indices)
 
         return losses
-
 
     def loss_clip_visual_vb(self, outputs, target_classes_o, indices):
         intd_out = outputs['intd_out']
@@ -856,6 +871,12 @@ class SetCriterionHOI(nn.Module):
         for i in range(len(indices)):
             for j in indices[i][0]:
                 intd_out_o.append(intd_out[i,j,:])
+        # if self.uncertainty:
+        #     uctt_out = outputs['uctt_verb']
+        #     uctt_out_o = []
+        #     for i in range(len(indices)):
+        #         for j in indices[i][0]:
+        #             uctt_out_o.append(uctt_out[i, j, :])
         loss_vb_embed = []
         sep = [0]
         for p in range(len(indices)):
@@ -867,19 +888,35 @@ class SetCriterionHOI(nn.Module):
             if len(intd_out_o_):
                 intd_out_o_ = torch.stack(intd_out_o_)
                 vb_visual = []
+                # vb_text = []
                 intd_out = []
+                # uctt_out = []
                 vb_indices = target_classes_o_.nonzero()
                 if len(vb_indices):
                     for i, j in vb_indices:
                         intd_out.append(intd_out_o_[i])
                         vb_visual.append(self.clip_verb_v[j])
+                        # vb_text.append(self.clip_verb_t[j])
+                        # if self.uncertainty:
+                        #     uctt_out.append(uctt_out_o[i])
                     intd_out = torch.stack(intd_out)
+                    # intd_out = F.normalize(intd_out, dim=1)
                     vb_visual = torch.stack(vb_visual)
+                    # vb_visual = F.normalize(vb_visual, dim=1)
+                    #vb_text = torch.stack(vb_text)
+                    # if self.uncertainty:
+                    #     uctt_out = torch.stack(uctt_out)
+                    #     loss_vb_embed = torch.abs(intd_out - vb_visual)
+                    #     loss_vb_embed = loss_vb_embed * torch.exp(-uctt_out) + uctt_out
+                    #     loss_vb_embed = torch.mean(loss_vb_embed)
+                    # else:
+                    #     loss_vb_embed = F.l1_loss(intd_out, vb_visual) #+ F.l1_loss(intd_out, vb_text)
                     loss_vb_embed_ = F.l1_loss(intd_out, vb_visual)
+                    # loss_vb_embed = 1 - F.cosine_similarity(intd_out, vb_text)
+                    # loss_vb_embed = loss_vb_embed.sum()
             loss_vb_embed.append(loss_vb_embed_)
         loss_vb_embed = torch.stack(loss_vb_embed)
         return loss_vb_embed
-
 
     def loss_sub_obj_boxes(self, outputs, targets, indices, num_interactions):
         assert 'pred_sub_boxes' in outputs and 'pred_obj_boxes' in outputs
@@ -889,25 +926,37 @@ class SetCriterionHOI(nn.Module):
         target_sub_boxes = torch.cat([t['sub_boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         target_obj_boxes = torch.cat([t['obj_boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
-        exist_obj_boxes = (target_obj_boxes != 0).any(dim=1)
+        losses = {'loss_sub_bbox': [], 'loss_obj_bbox': [], 'loss_sub_giou': [], 'loss_obj_giou': []}
+        sep = [0]
+        for i in range(len(indices)):
+            sep.append(len(indices[i][0])+sep[i])
+        for i in range(len(sep)-1):
+            src_sub_boxes_ = src_sub_boxes[sep[i]:sep[i+1]]
+            src_obj_boxes_ = src_obj_boxes[sep[i]:sep[i+1]]
+            target_sub_boxes_ = target_sub_boxes[sep[i]:sep[i+1]]
+            target_obj_boxes_ = target_obj_boxes[sep[i]:sep[i+1]]
+            num = src_sub_boxes_.shape[0]
 
-        losses = {}
-        if src_sub_boxes.shape[0] == 0:
-            losses['loss_sub_bbox'] = src_sub_boxes.sum()
-            losses['loss_obj_bbox'] = src_obj_boxes.sum()
-            losses['loss_sub_giou'] = src_sub_boxes.sum()
-            losses['loss_obj_giou'] = src_obj_boxes.sum()
-        else:
-            loss_sub_bbox = F.l1_loss(src_sub_boxes, target_sub_boxes, reduction='none')
-            loss_obj_bbox = F.l1_loss(src_obj_boxes, target_obj_boxes, reduction='none')
-            losses['loss_sub_bbox'] = loss_sub_bbox.sum() / num_interactions
-            losses['loss_obj_bbox'] = (loss_obj_bbox * exist_obj_boxes.unsqueeze(1)).sum() / (exist_obj_boxes.sum() + 1e-4)
-            loss_sub_giou = 1 - torch.diag(generalized_box_iou(box_cxcywh_to_xyxy(src_sub_boxes),
-                                                               box_cxcywh_to_xyxy(target_sub_boxes)))
-            loss_obj_giou = 1 - torch.diag(generalized_box_iou(box_cxcywh_to_xyxy(src_obj_boxes),
-                                                               box_cxcywh_to_xyxy(target_obj_boxes)))
-            losses['loss_sub_giou'] = loss_sub_giou.sum() / num_interactions
-            losses['loss_obj_giou'] = (loss_obj_giou * exist_obj_boxes).sum() / (exist_obj_boxes.sum() + 1e-4)
+            exist_obj_boxes = (target_obj_boxes_ != 0).any(dim=1)
+
+            if src_sub_boxes_.shape[0] == 0:
+                losses['loss_sub_bbox'].append(src_sub_boxes_.sum())
+                losses['loss_obj_bbox'].append(src_obj_boxes_.sum())
+                losses['loss_sub_giou'].append(src_sub_boxes_.sum())
+                losses['loss_obj_giou'].append(src_obj_boxes_.sum())
+            else:
+                loss_sub_bbox = F.l1_loss(src_sub_boxes_, target_sub_boxes_, reduction='none')
+                loss_obj_bbox = F.l1_loss(src_obj_boxes_, target_obj_boxes_, reduction='none')
+                losses['loss_sub_bbox'].append(loss_sub_bbox.sum() / num)
+                losses['loss_obj_bbox'].append((loss_obj_bbox * exist_obj_boxes.unsqueeze(1)).sum() / (exist_obj_boxes.sum() + 1e-4))
+                loss_sub_giou = 1 - torch.diag(generalized_box_iou(box_cxcywh_to_xyxy(src_sub_boxes_),
+                                                                   box_cxcywh_to_xyxy(target_sub_boxes_)))
+                loss_obj_giou = 1 - torch.diag(generalized_box_iou(box_cxcywh_to_xyxy(src_obj_boxes_),
+                                                                   box_cxcywh_to_xyxy(target_obj_boxes_)))
+                losses['loss_sub_giou'].append(loss_sub_giou.sum() / num)
+                losses['loss_obj_giou'].append((loss_obj_giou * exist_obj_boxes).sum() / (exist_obj_boxes.sum() + 1e-4))
+        for k, v in losses.items():
+            losses[k] = torch.stack(v)
         return losses
 
     def loss_matching_labels(self, outputs, targets, indices, num_interactions, log=True):
@@ -934,11 +983,11 @@ class SetCriterionHOI(nn.Module):
         if 'uctt_verb' in outputs:
             uncertainty = outputs['uctt_verb']
         if not src_logits.shape[1] or uncertainty is None:
-            losses = {'loss_uctt': torch.tensor(0., requires_grad=True, device=src_logits.device),
-                      'loss_verb_uctt': torch.tensor(0., requires_grad=True, device=src_logits.device)}
+            losses = {'loss_uctt': torch.tensor([0., 0.], requires_grad=True, device=src_logits.device),
+                      'loss_verb_uctt': torch.tensor([0., 0.], requires_grad=True, device=src_logits.device)}
             return losses
 
-        uctt_avg = torch.log(torch.mean(torch.exp(uncertainty)))
+        uctt_avg = torch.log(torch.mean(torch.exp(uncertainty.squeeze(2)),dim=1))
         losses = {'loss_uctt': uctt_avg,
                   'loss_verb_uctt': uctt_avg * torch.exp(uctt_avg)}
         return losses

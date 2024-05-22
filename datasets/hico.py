@@ -219,9 +219,9 @@ class HICODetection(torch.utils.data.Dataset):
         elif zero_shot_type == 'non_rare_first':
             with open('data/hico_20160224_det/indices_superclass_hico_c_nf.json', 'r') as f:
                 self.superclasses = json.load(f)
-        with open('data/hico_20160224_det/weights_sample_hico.json') as f:
-            self.weights_sample = json.load(f)
-            self.weights_sample = [w ** 0.25 for w in self.weights_sample]
+        # with open('data/hico_20160224_det/weights_sample_hico_hoi.json') as f:
+        #     self.weights_sample = json.load(f)
+        #     self.weights_sample = [w ** 0.25 for w in self.weights_sample]
 
     def __len__(self):
         return len(self.ids)

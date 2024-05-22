@@ -36,11 +36,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     elif dataset == 'hico':
         is_hico = True
         obj_vb_matrix = np.load('data/hico_20160224_det/hico_obj_vb_matrix.npy')
+        print_freq = 1000
     if isinstance(data_loader, list):
-        obj_vb_matrix_hico = np.load('data/hico_20160224_det/hico_obj_vb_matrix.npy')
-        obj_vb_matrix_vcoco = np.load('data/v-coco/vcoco_obj_vb_matrix.npy')
         batch_idx = 0
-        #random.seed(seed)
+        # random.seed(seed)
         random.shuffle(data_loader)
         for p in range(len(data_loader)):
             data_loader_sub = data_loader[p]
@@ -50,11 +49,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 targets = [{k: v.to(device) for k, v in t.items() if k != 'filename'} for t in targets]
                 targets = [tuple(targets)]
                 half_bs = int(samples[0].tensors.shape[0] / 2)
-
-                if targets[0][0]['verb_labels'].shape[1] == 117:
-                    obj_vb_matrix = obj_vb_matrix_hico
-                elif targets[0][0]['verb_labels'].shape[1] == 29:
-                    obj_vb_matrix = obj_vb_matrix_vcoco
                 targets_compo = []
                 for i in range(half_bs * 2):
                     index = half_bs + i if i < half_bs else i - half_bs
@@ -124,11 +118,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     sub_boxes_compo = []
                     obj_boxes_compo = []
                     # self compo
-                    if num_HO_1 > 1:
-                        for j in range(num_HO_1):
+                    if num_HO_2 > 1:
+                        for j in range(num_HO_2):
                             is_repeat = True
-                            obj_index = target_compo['obj_labels'][j]
-                            verb_labels = copy.deepcopy(target_compo['verb_labels'])
+                            obj_index = targets[0][index]['obj_labels'][j]
+                            verb_labels = copy.deepcopy(targets[0][index]['verb_labels'])
                             mask = torch.ones(verb_labels.shape[0], dtype=bool)
                             mask[j] = False
                             verb_labels = verb_labels[mask, :]
@@ -154,8 +148,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                                 verb_labels_compo.append(verb_labels)
                             if is_repeat:
                                 obj_labels_compo.append(obj_index.repeat(verb_labels.shape[0]))
-                                sub_boxes_compo.append(target_compo['sub_boxes'][j, :].repeat(verb_labels.shape[0], 1))
-                                obj_boxes_compo.append(target_compo['obj_boxes'][j, :].repeat(verb_labels.shape[0], 1))
+                                sub_boxes_compo.append(targets[0][index]['sub_boxes'][j, :].repeat(verb_labels.shape[0], 1))
+                                obj_boxes_compo.append(targets[0][index]['obj_boxes'][j, :].repeat(verb_labels.shape[0], 1))
                     if len(obj_labels_compo):
                         self_obj_labels = torch.cat(obj_labels_compo)
                         self_verb_labels = torch.cat(verb_labels_compo, 0)
@@ -210,25 +204,36 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         uctt_avg = 0
                         batch_weight_avg = 0
                         for j in range(len(layer_uctt)):
-                            uctt_avg = uctt_avg + torch.exp(layer_uctt[j]) / len(layer_uctt)
-                            batch_weight_avg = batch_weight_avg + torch.exp(-2 * layer_uctt[j]) / len(layer_uctt)
+                            uctt_avg = uctt_avg + torch.mean(torch.exp(layer_uctt[j])) / len(layer_uctt)
+                            batch_weight_avg = batch_weight_avg + torch.mean(torch.exp(-2 * layer_uctt[j])) / len(
+                                layer_uctt)
                         uctt_avg = torch.log(uctt_avg)
                         uctt_list.append(uctt_avg)
 
                         batch_weight[i] = batch_weight_avg
 
                         #uctt+focal31
-                        layer_losses = []
+                        # layer_losses = []
                         last_key = ['loss_obj_ce', 'obj_class_error', 'loss_verb_ce', 'loss_sub_bbox', 'loss_obj_bbox',
-                                    'loss_sub_giou', 'loss_obj_giou', 'obj_cardinality_error', 'loss_uctt', 'loss_verb_uctt']
-                        layer_losses.append(sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if
-                                                k in weight_dict and k in last_key))
-                        for p in range(len(layer_uctt)-1):
-                            layer_losses.append(sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if
-                                                k in weight_dict and str(p) in k))
+                                    'loss_sub_giou', 'loss_obj_giou', 'obj_cardinality_error', 'loss_verb_uctt', 'loss_verb_embed']
+                        # layer_losses.append(sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if
+                        #                         k in weight_dict and k in last_key))
+                        # for p in range(len(layer_uctt)-1):
+                        #     layer_losses.append(sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if
+                        #                         k in weight_dict and str(p) in k))
+                        # for m in range(len(layer_uctt)):
+                        #     layer_losses[m] = layer_losses[m] * torch.exp(-2 * layer_uctt[m])
+                        # losses = sum(layer_losses)
+                        sample_losses = []
+                        sample_losses.append(sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if
+                                                 k in weight_dict and k in last_key))
+                        for p in range(len(layer_uctt) - 1):
+                            sample_losses.append(sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if
+                                                     k in weight_dict and str(p) in k))
                         for m in range(len(layer_uctt)):
-                            layer_losses[m] = layer_losses[m] * torch.exp(-2 * layer_uctt[m])
-                        losses = sum(layer_losses)
+                            sample_losses[m] = sample_losses[m] * torch.exp(-2 * layer_uctt[m])
+                            sample_losses[m] = torch.mean(sample_losses[m])
+                        losses = sum(sample_losses)
 
                     else:
                         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
@@ -239,6 +244,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         #batch_weight[i] = torch.exp(-2*loss_dict['loss_uctt'])
 
                     # reduce losses over all GPUs for logging purposes
+                    loss_dict = {k: torch.mean(v) for k, v in loss_dict.items()}
                     loss_dict_reduced = utils.reduce_dict(loss_dict)
                     loss_dict_reduced_unscaled = {f'{k}_unscaled': v
                                                   for k, v in loss_dict_reduced.items()}
@@ -349,10 +355,11 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     for samples, targets in metric_logger.log_every(data_loader, 100, header):
         samples = samples.to(device)
 
-        if args.compo:
-            outputs = model.module.forward_eval(samples)
-        else:
-            outputs = model(samples)
+        with torch.no_grad():
+            if args.compo:
+                outputs = model.module.forward_eval(samples)
+            else:
+                outputs = model(samples)
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = postprocessors['hoi'](outputs, orig_target_sizes)
 

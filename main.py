@@ -14,6 +14,7 @@ import datasets
 import util.misc as utils
 from datasets import build_dataset
 from engine import train_one_epoch, evaluate_hoi
+import engine_4new
 from models import build_model
 import os
 
@@ -160,6 +161,9 @@ def get_args_parser():
     parser.add_argument('--zero_shot_type', default='default', help='Zero-shot type')
     parser.add_argument('--clip_model', default='ViT-B/32', help='clip pretrained model path')
     parser.add_argument('--vis', action='store_true', help='visualize preds in tensorboard')
+    parser.add_argument('--clip_visual', action='store_true', help='use clip visual features to guide interaction features')
+    parser.add_argument('--superclass', action='store_true', help='use superclass-based sampling strategy')
+    parser.add_argument('--compo_new', action='store_true', help='use interaction decoder to re-compose interaction features')
 
     return parser
 
@@ -195,10 +199,16 @@ def main(args):
     if args.freeze_mode == 1:
         for name, p in model.named_parameters():
             if 'decoder' not in name and 'verb_class_embed' not in name and 'obj_class_embed' not in name \
-                and 'sub_bbox_embed' not in name and 'obj_bbox_embed' not in name:
+                and 'sub_bbox_embed' not in name and 'obj_bbox_embed' not in name \
+                    and 'verb_embed' not in name and 'uctt' not in name:
+            # if 'verb_class_embed' not in name and 'obj_class_embed' not in name \
+            #         and 'verb_embed' not in name and 'uctt' not in name:
                 p.requires_grad = False
             if args.use_matching and 'matching_embed' in name:
                 p.requires_grad = True
+            # if '_decoder' in name and '5' in name:
+            #     p.requires_grad = True
+            print(name,p.requires_grad)
 
     param_dicts = [
         {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},
@@ -214,62 +224,63 @@ def main(args):
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
     if args.compo:
-        length = 0
-        dataset_subsets = []
-        sampler_subsets = []
-        batch_sampler_subsets = []
-        data_loader_train = []
-        for idx_sub in dataset_train.superclasses:
-            dataset_sub = torch.utils.data.Subset(dataset_train, idx_sub)
-            dataset_subsets.append(dataset_sub)
+        if args.superclass:
+            length = 0
+            dataset_subsets = []
+            sampler_subsets = []
+            batch_sampler_subsets = []
+            data_loader_train = []
+            for idx_sub in dataset_train.superclasses:
+                dataset_sub = torch.utils.data.Subset(dataset_train, idx_sub)
+                dataset_subsets.append(dataset_sub)
+                if args.distributed:
+                    # print('w')
+                    # weights_sub = [dataset_train.weights_sample[w] for w in idx_sub]
+                    # sampler_weighted = torch.utils.data.WeightedRandomSampler(weights_sub, len(dataset_sub))
+                    # sampler_sub = utils.DistributedSamplerWrapper(sampler_weighted)
+                    sampler_sub = DistributedSampler(dataset_sub)
+                    sampler_subsets.append(sampler_sub)
+                    sampler_val = DistributedSampler(dataset_val, shuffle=False)
+                else:
+                    sampler_sub = torch.utils.data.RandomSampler(dataset_sub)
+                    sampler_subsets.append(sampler_sub)
+                    sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+                batch_sampler_sub = torch.utils.data.BatchSampler(sampler_sub, batch_size=args.batch_size, drop_last=True)
+                batch_sampler_subsets.append(batch_sampler_sub)
+                data_loader_sub = DataLoader(dataset_sub, batch_sampler=batch_sampler_sub,
+                                             collate_fn=utils.collate_fn, num_workers=args.num_workers)
+                data_loader_train.append(data_loader_sub)
+                length += len(data_loader_sub)
+        else:
+            dataset_train_sub1, dataset_train_sub2 = torch.utils.data.random_split(dataset_train, [int(len(dataset_train)/2), len(dataset_train)-int(len(dataset_train)/2)])
+            length = len(dataset_train_sub1)
+            # weights_sub1, weights_sub2 = [], []
+            # for i in dataset_train_sub1.indices:
+            #     weights_sub1.append(dataset_train.weights_sample[i])
+            # for i in dataset_train_sub2.indices:
+            #     weights_sub2.append(dataset_train.weights_sample[i])
             if args.distributed:
-                # print('w')
-                # weights_sub = [dataset_train.weights_sample[w] for w in idx_sub]
-                # sampler_weighted = torch.utils.data.WeightedRandomSampler(weights_sub, len(dataset_sub))
-                # sampler_sub = utils.DistributedSamplerWrapper(sampler_weighted)
-                sampler_sub = DistributedSampler(dataset_sub)
-                sampler_subsets.append(sampler_sub)
+                print('1')
+            #     sampler_weighted1 = torch.utils.data.WeightedRandomSampler(weights_sub1, len(dataset_train_sub1))
+            #     sampler_weighted2 = torch.utils.data.WeightedRandomSampler(weights_sub2, len(dataset_train_sub2))
+            #     sampler_train_sub1 = utils.DistributedSamplerWrapper(sampler_weighted1)
+            #     sampler_train_sub2 = utils.DistributedSamplerWrapper(sampler_weighted2)
+                sampler_train_sub1 = DistributedSampler(dataset_train_sub1)
+                sampler_train_sub2 = DistributedSampler(dataset_train_sub2)
                 sampler_val = DistributedSampler(dataset_val, shuffle=False)
             else:
-                sampler_sub = torch.utils.data.RandomSampler(dataset_sub)
-                sampler_subsets.append(sampler_sub)
+                # sampler_train_sub1 = torch.utils.data.WeightedRandomSampler(weights_sub1, len(dataset_train_sub1))
+                # sampler_train_sub2 = torch.utils.data.WeightedRandomSampler(weights_sub2, len(dataset_train_sub2))
+                sampler_train_sub1 = torch.utils.data.RandomSampler(dataset_train_sub1)
+                sampler_train_sub2 = torch.utils.data.RandomSampler(dataset_train_sub2)
                 sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-            batch_sampler_sub = torch.utils.data.BatchSampler(sampler_sub, batch_size=args.batch_size, drop_last=True)
-            batch_sampler_subsets.append(batch_sampler_sub)
-            data_loader_sub = DataLoader(dataset_sub, batch_sampler=batch_sampler_sub,
-                                         collate_fn=utils.collate_fn, num_workers=args.num_workers)
-            data_loader_train.append(data_loader_sub)
-            length += len(data_loader_sub)
-
-        # dataset_train_sub1, dataset_train_sub2 = torch.utils.data.random_split(dataset_train, [int(len(dataset_train)/2), len(dataset_train)-int(len(dataset_train)/2)])
-        # length = len(dataset_train_sub1)
-        # # weights_sub1, weights_sub2 = [], []
-        # # for i in dataset_train_sub1.indices:
-        # #     weights_sub1.append(dataset_train.weights_sample[i])
-        # # for i in dataset_train_sub2.indices:
-        # #     weights_sub2.append(dataset_train.weights_sample[i])
-        # if args.distributed:
-        #     print('1')
-        # #     sampler_weighted1 = torch.utils.data.WeightedRandomSampler(weights_sub1, len(dataset_train_sub1))
-        # #     sampler_weighted2 = torch.utils.data.WeightedRandomSampler(weights_sub2, len(dataset_train_sub2))
-        # #     sampler_train_sub1 = utils.DistributedSamplerWrapper(sampler_weighted1)
-        # #     sampler_train_sub2 = utils.DistributedSamplerWrapper(sampler_weighted2)
-        #     sampler_train_sub1 = DistributedSampler(dataset_train_sub1)
-        #     sampler_train_sub2 = DistributedSampler(dataset_train_sub2)
-        #     sampler_val = DistributedSampler(dataset_val, shuffle=False)
-        # else:
-        #     # sampler_train_sub1 = torch.utils.data.WeightedRandomSampler(weights_sub1, len(dataset_train_sub1))
-        #     # sampler_train_sub2 = torch.utils.data.WeightedRandomSampler(weights_sub2, len(dataset_train_sub2))
-        #     sampler_train_sub1 = torch.utils.data.RandomSampler(dataset_train_sub1)
-        #     sampler_train_sub2 = torch.utils.data.RandomSampler(dataset_train_sub2)
-        #     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-        # batch_sampler_train_sub1 = torch.utils.data.BatchSampler(sampler_train_sub1, batch_size=int(args.batch_size/2), drop_last=True)
-        # batch_sampler_train_sub2 = torch.utils.data.BatchSampler(sampler_train_sub2, batch_size=int(args.batch_size/2), drop_last=True)
-        # data_loader_train_sub1 = DataLoader(dataset_train_sub1, batch_sampler=batch_sampler_train_sub1,
-        #                                collate_fn=utils.collate_fn, num_workers=args.num_workers)
-        # data_loader_train_sub2 = DataLoader(dataset_train_sub2, batch_sampler=batch_sampler_train_sub2,
-        #                                collate_fn=utils.collate_fn, num_workers=args.num_workers)
-        # data_loader_train = [data_loader_train_sub1, data_loader_train_sub2]
+            batch_sampler_train_sub1 = torch.utils.data.BatchSampler(sampler_train_sub1, batch_size=max(1,int(args.batch_size/2)), drop_last=True)
+            batch_sampler_train_sub2 = torch.utils.data.BatchSampler(sampler_train_sub2, batch_size=max(1,int(args.batch_size/2)), drop_last=True)
+            data_loader_train_sub1 = DataLoader(dataset_train_sub1, batch_sampler=batch_sampler_train_sub1,
+                                           collate_fn=utils.collate_fn, num_workers=args.num_workers)
+            data_loader_train_sub2 = DataLoader(dataset_train_sub2, batch_sampler=batch_sampler_train_sub2,
+                                           collate_fn=utils.collate_fn, num_workers=args.num_workers)
+            data_loader_train = [data_loader_train_sub1, data_loader_train_sub2]
     else:
         if args.distributed:
             # print('1')
@@ -295,6 +306,7 @@ def main(args):
         model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
     output_dir = Path(args.output_dir)
+    best_performance = 0
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -308,6 +320,9 @@ def main(args):
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
             print('start from epoch '+ str(args.start_epoch))
+        if 'best_perf' in checkpoint:
+            best_performance = checkpoint['best_perf']
+            print('best performance:', best_performance)
     elif args.pretrained:
         checkpoint = torch.load(args.pretrained, map_location='cpu')
         if args.eval:
@@ -324,19 +339,25 @@ def main(args):
 
     print("Start training")
     start_time = time.time()
-    best_performance = 0
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             if args.compo:
-                # sampler_train_sub1.set_epoch(epoch)
-                # sampler_train_sub2.set_epoch(epoch)
-                for sampler_sub in sampler_subsets:
-                    sampler_sub.set_epoch(epoch)
+                if args.superclass:
+                    for sampler_sub in sampler_subsets:
+                        sampler_sub.set_epoch(epoch)
+                else:
+                    sampler_train_sub1.set_epoch(epoch)
+                    sampler_train_sub2.set_epoch(epoch)
             else:
                 sampler_train.set_epoch(epoch)
-        train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer, device, epoch,
-            args.clip_max_norm, args.dataset_file, args.batch_weight_mode, args.label_smoothing, length)
+        if args.superclass:
+            train_stats = train_one_epoch(
+                model, criterion, data_loader_train, optimizer, device, epoch,
+                args.clip_max_norm, args.dataset_file, args.batch_weight_mode, args.label_smoothing, length)
+        else:
+            train_stats = engine_4new.train_one_epoch(
+                model, criterion, data_loader_train, optimizer, device, epoch,
+                args.clip_max_norm, args.dataset_file, args.batch_weight_mode, args.label_smoothing, length)
         if tb_writer is not None:
             for k, meter in train_stats.items():
                 tb_writer.add_scalar(k, meter, epoch+(args.freeze_mode*90))
@@ -351,6 +372,7 @@ def main(args):
             'lr_scheduler': lr_scheduler.state_dict(),
             'epoch': epoch,
             'args': args,
+            'best_perf': best_performance
         }, checkpoint_path)
 
 
@@ -377,9 +399,19 @@ def main(args):
                 'lr_scheduler': lr_scheduler.state_dict(),
                 'epoch': epoch,
                 'args': args,
+                'best_perf': performance
             }, checkpoint_path)
         
             best_performance = performance
+
+            utils.save_on_master({
+                'model': model_without_ddp.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'epoch': epoch,
+                'args': args,
+                'best_perf': best_performance
+            }, checkpoint_path)
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},
@@ -400,6 +432,7 @@ def main(args):
                     for name in filenames:
                         torch.save(coco_evaluator.coco_eval["bbox"].eval,
                                    output_dir / "eval" / name)
+        torch.cuda.empty_cache()
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
