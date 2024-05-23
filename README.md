@@ -1,22 +1,25 @@
-# CDN
-Code for our NeurIPS 2021 paper "[Mining the Benefits of Two-stage and One-stage HOI Detection](https://arxiv.org/pdf/2108.05077.pdf)".
+## 硕士学位论文代码
 
-Contributed by Aixi Zhang*, [Yue Liao*](https://liaoyue.net/), [Si Liu](http://colalab.org/people), Miao Lu, Yongliang Wang, Chen Gao and Xiaobo Li.
+2131488 庄子鲲
 
-![](paper_images/framework.png)
-
-## Installation
-Installl the dependencies.
+## 环境搭建
+安装所需包
 ```
 pip install -r requirements.txt
 ```
+安装CLIP
+```
+pip install ftfy regex tqdm
+pip install git+https://github.com/openai/CLIP.git
+```
 
-## Data preparation
+## 数据集下载
 
 ### HICO-DET
-HICO-DET dataset can be downloaded [here](https://drive.google.com/open?id=1QZcJmGVlF9f4h-XLWe9Gkmnmj2z1gSnk). After finishing downloading, unpack the tarball (`hico_20160224_det.tar.gz`) to the `data` directory.
+[下载链接](https://drive.google.com/open?id=1QZcJmGVlF9f4h-XLWe9Gkmnmj2z1gSnk)
+。下载后将`hico_20160224_det.tar.gz`解压至`data`目录。
 
-Instead of using the original annotations files, we use the annotation files provided by the PPDM authors. The annotation files can be downloaded from [here](https://drive.google.com/open?id=1WI-gsNLS-t0Kh8TVki1wXqc3y2Ow1f2R). The downloaded annotation files have to be placed as follows.
+另外需要下载PPDM作者的注释文件：[下载链接](https://drive.google.com/open?id=1WI-gsNLS-t0Kh8TVki1wXqc3y2Ow1f2R)，将注释文件如下所示放置在`data`目录中：
 ```
 data
  └─ hico_20160224_det
@@ -28,7 +31,8 @@ data
 ```
 
 ### V-COCO
-First clone the repository of V-COCO from [here](https://github.com/s-gupta/v-coco), and then follow the instruction to generate the file `instances_vcoco_all_2014.json`. Next, download the prior file `prior.pickle` from [here](https://drive.google.com/drive/folders/10uuzvMUCVVv95-xAZg5KS94QXm7QXZW4). Place the files and make directories as follows.
+首先克隆[V-COCO仓库](https://github.com/s-gupta/v-coco)，按照仓库中的指示编译生成`instances_vcoco_all_2014.json`文件，然后下载`prior.pickle`文件[下载链接](https://drive.google.com/drive/folders/10uuzvMUCVVv95-xAZg5KS94QXm7QXZW4)，
+将文件如下所示放置在`data`目录中：
 ```
 CDN
  |─ data
@@ -47,7 +51,7 @@ CDN
  |       |─ annotations
  :       :
 ```
-For our implementation, the annotation file have to be converted to the HOIA format. The conversion can be conducted as follows.
+运行以下命令，将PPDM注释文件转换为HOI-A格式：
 ```
 PYTHONPATH=data/v-coco \
         python convert_vcoco_annotations.py \
@@ -55,14 +59,12 @@ PYTHONPATH=data/v-coco \
         --prior_path data/v-coco/prior.pickle \
         --save_path data/v-coco/annotations
 ```
-Note that only Python2 can be used for this conversion because `vsrl_utils.py` in the v-coco repository shows a error with Python3.
-
-V-COCO annotations with the HOIA format, `corre_vcoco.npy`, `test_vcoco.json`, and `trainval_vcoco.json` will be generated to `annotations` directory.
+执行此命令时需使用Python2，Python3会在`vsrl_utils.py`中报错。成功执行后，在`annotations`目录会生成HOI-A格式的注释文件`corre_vcoco.npy`, `test_vcoco.json`，`trainval_vcoco.json`。
 
 
 
-## Pre-trained model
-Download the pretrained model of DETR detector for [ResNet50](https://dl.fbaipublicfiles.com/detr/detr-r50-e632da11.pth), and put it to the `params` directory.
+## 预训练DETR参数
+下载DETR预训练参数[下载链接](https://dl.fbaipublicfiles.com/detr/detr-r50-e632da11.pth)，将其放置于`params`目录。
 ```
 python convert_parameters.py \
         --load_path params/detr-r50-e632da11.pth \
@@ -75,15 +77,11 @@ python convert_parameters.py \
         --dataset vcoco
 ```
 
-## Training
-After the preparation, you can start training with the following commands. The whole training is split into two steps: CDN base model training and dynamic re-weighting training. The trainings of CDN-S for HICO-DET and V-COCO are shown as follows.
-
+## 训练
+训练分为两步，首先训练整个模型，之后对解码器和前馈网络进行微调训练。
 ### HICO-DET
 ```
-python -m torch.distributed.launch \
-        --nproc_per_node=8 \
-        --use_env \
-        main.py \
+torchrun --nproc_per_node=2 main.py \
         --pretrained params/detr-r50-pre-2stage-q64.pth \
         --output_dir logs \
         --dataset_file hico \
@@ -92,41 +90,47 @@ python -m torch.distributed.launch \
         --num_verb_classes 117 \
         --backbone resnet50 \
         --num_queries 64 \
-        --dec_layers_hopd 3 \
-        --dec_layers_interaction 3 \
+        --dec_layers_hopd 6 \
+        --dec_layers_interaction 6 \
         --epochs 90 \
         --lr_drop 60 \
-        --use_nms_filter
+        --use_nms_filter \
+        --compo \  #第3章方法
+        --compo_new \ #第3章方法
+        --batch_weight_mode 1 \ #第3章方法
+        --uncertainty \ #第4章方法
+        --superclass \ #第5章方法
+        --clip_visual \ #第5章方法
 
-python -m torch.distributed.launch \
-        --nproc_per_node=8 \
-        --use_env \
-        main.py \
-        --pretrained logs/checkpoint_last.pth \
-        --output_dir logs/ \
+torchrun --nproc_per_node=2 main.py \
+        --pretrained logs/checkpoint_last_90.pth \
+        --output_dir logs \
         --dataset_file hico \
         --hoi_path data/hico_20160224_det \
         --num_obj_classes 80 \
         --num_verb_classes 117 \
         --backbone resnet50 \
         --num_queries 64 \
-        --dec_layers_hopd 3 \
-        --dec_layers_interaction 3 \
+        --dec_layers_hopd 6 \
+        --dec_layers_interaction 6 \
         --epochs 10 \
         --freeze_mode 1 \
         --obj_reweight \
         --verb_reweight \
         --lr 1e-5 \
         --lr_backbone 1e-6 \
-        --use_nms_filter
+        --use_nms_filter \
+        --compo \  #第3章方法
+        --compo_new \ #第3章方法
+        --batch_weight_mode 1 \ #第3章方法
+        --uncertainty \ #第4章方法
+        --superclass \ #第5章方法
+        --clip_visual \ #第5章方法
 ```
 
 ### V-COCO
 ```
-python -m torch.distributed.launch \
-        --nproc_per_node=8 \
-        --use_env \
-        main.py \
+torchrun --nproc_per_node=2 main.py \
         --pretrained params/detr-r50-pre-2stage.pth \
         --output_dir logs \
         --dataset_file vcoco \
@@ -139,12 +143,15 @@ python -m torch.distributed.launch \
         --dec_layers_interaction 3 \
         --epochs 90 \
         --lr_drop 60 \
-        --use_nms_filter
+        --use_nms_filter \
+        --compo \  #第3章方法
+        --compo_new \ #第3章方法
+        --batch_weight_mode 2 \ #第3章方法
+        --uncertainty \ #第4章方法
+        --superclass \ #第5章方法
+        --clip_visual \ #第5章方法
 
-python -m torch.distributed.launch \
-        --nproc_per_node=8 \
-        --use_env \
-        main.py \
+torchrun --nproc_per_node=2 main.py \
         --pretrained logs/checkpoint_last.pth \
         --output_dir logs/ \
         --dataset_file vcoco \
@@ -160,33 +167,43 @@ python -m torch.distributed.launch \
         --verb_reweight \
         --lr 1e-5 \
         --lr_backbone 1e-6 \
-        --use_nms_filter
+        --use_nms_filter \
+        --compo \  #第3章方法
+        --compo_new \ #第3章方法
+        --batch_weight_mode 2 \ #第3章方法
+        --uncertainty \ #第4章方法
+        --superclass \ #第5章方法
+        --clip_visual \ #第5章方法
 ```
 
-## Evaluation
+## 性能评估
 
 ### HICO-DET
-You can conduct the evaluation with trained parameters for HICO-DET as follows.
+
+对于训练得到的模型参数`trained_params.pth`，运行以下命令进行性能评估：
 ```
-python -m torch.distributed.launch \
-        --nproc_per_node=8 \
-        --use_env \
-        main.py \
-        --pretrained pretrained/hico_cdn_s.pth \
+torchrun --nproc_per_node=2 main.py \
+        --pretrained trained_params.pth \
         --dataset_file hico \
         --hoi_path data/hico_20160224_det \
         --num_obj_classes 80 \
         --num_verb_classes 117 \
         --backbone resnet50 \
         --num_queries 64 \
-        --dec_layers_hopd 3 \
-        --dec_layers_interaction 3 \
+        --dec_layers_hopd 6 \
+        --dec_layers_interaction 6 \
         --eval \
-        --use_nms_filter
+        --use_nms_filter \
+        --compo \  #第3章方法
+        --compo_new \ #第3章方法
+        --batch_weight_mode 2 \ #第3章方法
+        --uncertainty \ #第4章方法
+        --superclass \ #第5章方法
+        --clip_visual \ #第5章方法
 ```
 
 ### V-COCO
-Firstly, you need the add the following main function to the vsrl_eval.py in data/v-coco.
+首先在`data/v-coco/vsrl_eval.py`的主函数中添加以下代码：
 ```
 if __name__ == '__main__':
   import sys
@@ -201,7 +218,7 @@ if __name__ == '__main__':
   vcocoeval._do_eval(det_file, ovr_thresh=0.5)
 ```
 
-Next, for the official evaluation of V-COCO, a pickle file of detection results have to be generated. You can generate the file with the following command. and then evaluate it as follows.
+之后运行如下命令进行性能评估：
 ```
 python generate_vcoco_official.py \
         --param_path pretrained/vcoco_cdn_s.pth \
@@ -209,46 +226,16 @@ python generate_vcoco_official.py \
         --hoi_path data/v-coco \
         --dec_layers_hopd 3 \
         --dec_layers_interaction 3 \
-        --use_nms_filter
+        --use_nms_filter \
+        --compo \  #第3章方法
+        --compo_new \ #第3章方法
+        --batch_weight_mode 2 \ #第3章方法
+        --uncertainty \ #第4章方法
+        --superclass \ #第5章方法
+        --clip_visual \ #第5章方法
 
 cd data/v-coco
 python vsrl_eval.py vcoco.pickle
-
 ```
 
-
-## Results
-
-### HICO-DET
-||Full (D)|Rare (D)|Non-rare (D)|Full(KO)|Rare (KO)|Non-rare (KO)|Download|
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-|CDN-S (R50)| 31.44 | 27.39 | 32.64 | 34.09 | 29.63 | 35.42 | [model](https://drive.google.com/file/d/1-GuJ4FGTGJAktH2NVR6Qp_N0zimg7uRr/view?usp=sharing) |
-|CDN-B (R50)| 31.78 | 27.55 | 33.05 | 34.53 | 29.73 | 35.96 | [model](https://drive.google.com/file/d/1oGT_oGR_QiJuLqCcfGTTAh9v-wj2DhGL/view?usp=sharing) |
-|CDN-L (R101)| 32.07 | 27.19 | 33.53 | 34.79 | 29.48 | 36.38 | [model](https://drive.google.com/file/d/1SHR2wD4WIte5k1PkaHKg4hCVlu316oOw/view?usp=sharing) |
-
-D: Default, KO: Known object
-
-### V-COCO
-|| Scenario 1 | Scenario 2 | Download | 
-| :--- | :---: | :---: | :---: |
-|CDN-S (R50)| 61.68 | 63.77 | [model](https://drive.google.com/file/d/1qI-tZwSry4ZipkO05PMeZVkCi-IOMSDZ/view?usp=sharing) |
-|CDN-B (R50)| 62.29 | 64.42 | [model](https://drive.google.com/file/d/1lUGoIfqcizLyukYJwKm83CduWKQnuWc8/view?usp=sharing) |
-|CDN-L (R101)| 63.91 | 65.89 | [model](https://drive.google.com/file/d/1EAOMRr5ArQNKZm1fyQqC81EoOediV3rT/view?usp=sharing) |
-
-## Citation
-Please consider citing our paper if it helps your research.
-```
-@article{zhang2021mining,
-  title={Mining the Benefits of Two-stage and One-stage HOI Detection},
-  author={Zhang, Aixi and Liao, Yue and Liu, Si and Lu, Miao and Wang, Yongliang and Gao, Chen and Li, Xiaobo},
-  journal={arXiv preprint arXiv:2108.05077},
-  year={2021}
-}
-```
-
-## License
-CDN is released under the Apache 2.0 license. See [LICENSE](LICENSE) for additional details.
-
-## Acknowledge
-Some of the codes are built upon [PPDM](https://github.com/YueLiao/PPDM), [DETR](https://github.com/facebookresearch/detr) and [QPIC](https://github.com/hitachi-rd-cv/qpic). Thanks them for their great works!
 
